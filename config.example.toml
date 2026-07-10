@@ -1,0 +1,25 @@
+# Each [[connections]] block starts one ssh process with any number of -L / -R forwards.
+# Authentication uses ordinary ~/.ssh/config (keys, agent, Host aliases).
+
+[[connections]]
+name = "c005"
+forwards = [
+  { mode = "local",  forward = "0.0.0.0:8080:127.0.0.1:8080" },
+  { mode = "remote", forward = "1081:192.168.31.1:7890" },
+]
+
+# keepalive: ServerAliveInterval / ServerAliveCountMax / ConnectTimeout (seconds).
+keepalive = { interval = 360, count_max = 10, connect_timeout = 15 }
+
+# Optional. Defaults: 1 s initial, max 60 s, reset delay after 60 s stable connection.
+# retry = { initial_seconds = 1, maximum_seconds = 60, stable_seconds = 60 }
+
+# Optional extra SSH arguments. Each item is one argument.
+# extra_args = ["-i", "/home/alice/.ssh/id_ed25519"]
+
+# [[connections]]
+# name = "c006"
+# forwards = [
+#   { mode = "remote", forward = "10022:127.0.0.1:22" },
+# ]
+# keepalive = { interval = 30, count_max = 3 }
