@@ -8,7 +8,7 @@
 - `BatchMode`, `ExitOnForwardFailure`, connect timeout, and SSH-layer keepalives by default;
 - Retry backoff with reset after a stable connection;
 - Configuration hot reload every two seconds: saving a valid TOML file restarts connections; an invalid update keeps the current set alive;
-- Optional rotating log file;
+- Optional log file, replaced on each program start;
 - Foreground operation on Linux and Windows; Windows Service installation commands on Windows.
 
 ## Build
@@ -40,21 +40,24 @@ extra_args = ["-i", "C:\\Users\\alice\\.ssh\\id_ed25519", "-o", "StrictHostKeyCh
 
 ## Windows Service
 
-Open an **elevated** PowerShell. Service-mode runs as `LocalSystem` whose `%USERPROFILE%` is `C:\Windows\System32\config\systemprofile`, so put the configuration somewhere reachable by the service account and pass it explicitly:
+Open an **elevated** PowerShell. Service-mode runs as `LocalSystem` whose `%USERPROFILE%` is `C:\Windows\System32\config\systemprofile`, so put the configuration somewhere reachable by the service account and pass it explicitly. Service registration and management are delegated to the system `sc.exe` through [`scripts/service.ps1`](scripts/service.ps1):
 
 ```powershell
 mkdir C:\ProgramData\autossh
 copy .\config.example.toml C:\ProgramData\autossh\config.toml
-.\rust-autossh.exe check --config C:\ProgramData\autossh\config.toml
-.\rust-autossh.exe install --config C:\ProgramData\autossh\config.toml
-.\rust-autossh.exe start
+.\scripts\service.ps1 install -Exe .\rust-autossh.exe -Config C:\ProgramData\autossh\config.toml
+.\scripts\service.ps1 start
+.\scripts\service.ps1 status
 ```
 
 The service is automatic and runs as `LocalSystem` by default. This account has a different home directory from your user, therefore user-specific `%USERPROFILE%\.ssh` keys and `ssh-agent` are normally unavailable. For production, either configure the service **Log On** account to the account owning the key, or use an explicit locked-down `ssh_path`/`extra_args` and key readable by the service account.
 
 ```powershell
-.\rust-autossh.exe stop
-.\rust-autossh.exe uninstall
+.\scripts\service.ps1 stop
+.\scripts\service.ps1 restart
+.\scripts\service.ps1 disable  # Disable automatic startup.
+.\scripts\service.ps1 enable   # Enable automatic startup.
+.\scripts\service.ps1 uninstall
 ```
 
 The Windows Service Control Manager does not restart a service that remains alive while it reconnects. `rust-autossh` performs those tunnel restarts itself. Optionally configure SCM recovery separately for a program crash:
@@ -68,4 +71,4 @@ sc.exe failure rust-autossh reset= 86400 actions= restart/5000/restart/5000/rest
 - Config content is checked every two seconds. A reload restarts only changed connections; changing log settings restarts all connections. Apply changes atomically (write a temporary file, then rename it) to avoid a transient syntax error.
 - `ExitOnForwardFailure=yes` is especially important for detecting a failed initial forwarding request.
 - A remote forward may still require `GatewayPorts` / `AllowTcpForwarding` on the SSH server.
-- Tunnel stdout/stderr are discarded. Supervisor events are written to stderr and, when configured, to the rotating log file. A service startup failure is additionally written to `rust-autossh.service-error.log` beside config.
+- Tunnel stdout/stderr are discarded. Supervisor events are written to stderr and, when configured, to a log file that is replaced on each program start. A service startup failure is additionally written to `rust-autossh.service-error.log` beside config.

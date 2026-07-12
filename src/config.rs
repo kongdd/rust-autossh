@@ -81,9 +81,6 @@ pub struct RetryConfig {
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
     pub file: Option<PathBuf>,
-    /// Rotate after this many MiB. Zero disables rotation.
-    #[serde(default = "default_rotate_mib")]
-    pub rotate_mib: u64,
 }
 
 fn enabled_by_default() -> bool {
@@ -107,10 +104,6 @@ fn default_retry_maximum() -> u64 {
 fn default_retry_stable() -> u64 {
     60
 }
-fn default_rotate_mib() -> u64 {
-    10
-}
-
 impl Default for KeepaliveConfig {
     fn default() -> Self {
         Self {
@@ -191,3 +184,7 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/config.rs"]
+mod tests;

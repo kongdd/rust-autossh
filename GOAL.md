@@ -224,4 +224,4 @@ ssh.exe -N -T `
 
 ```
 
-完成多隧道、自动重连、配置热加载、日志轮转和 Windows Service；无需自己实现 SSH 协议。
+完成多隧道、自动重连、配置热加载、日志记录和 Windows Service；无需自己实现 SSH 协议。

@@ -55,3 +55,7 @@ fn default_ssh_path() -> PathBuf {
         PathBuf::from("ssh")
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/ssh.rs"]
+mod tests;

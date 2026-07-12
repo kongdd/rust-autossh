@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+#[cfg(windows)]
 const SERVICE_NAME: &str = "rust-autossh";
 
 #[derive(Parser)]
@@ -38,17 +39,6 @@ enum CommandName {
         #[arg(short, long, default_value_os_t = default_config_path())]
         config: PathBuf,
     },
-    /// Register an automatic Windows service. Run from an elevated shell.
-    Install {
-        #[arg(short, long, default_value_os_t = default_config_path())]
-        config: PathBuf,
-    },
-    /// Ask the Windows Service Control Manager to start the service.
-    Start,
-    /// Ask the Windows Service Control Manager to stop the service.
-    Stop,
-    /// Remove the Windows service. Run from an elevated shell.
-    Uninstall,
     /// Open the configuration file in the default editor (code / code.exe).
     Edit {
         #[arg(short, long, default_value_os_t = default_config_path())]
@@ -63,10 +53,6 @@ fn main() -> Result<()> {
         CommandName::Run { config } => run_foreground(config),
         CommandName::Check { config } => check_config(config),
         CommandName::Service { config } => run_service(config),
-        CommandName::Install { config } => install_service(config),
-        CommandName::Start => sc_command(["start", SERVICE_NAME]),
-        CommandName::Stop => sc_command(["stop", SERVICE_NAME]),
-        CommandName::Uninstall => sc_command(["delete", SERVICE_NAME]),
         CommandName::Edit { config } => edit_config(config),
     }
 }
@@ -239,51 +225,6 @@ mod windows_service_host {
 #[cfg(not(windows))]
 fn run_service(_config: PathBuf) -> Result<()> {
     bail!("the `service` command is only available on Windows")
-}
-
-#[cfg(windows)]
-fn install_service(config: PathBuf) -> Result<()> {
-    let exe = std::env::current_exe().context("cannot determine executable path")?;
-    let config = config
-        .canonicalize()
-        .with_context(|| format!("cannot resolve configuration {}", config.display()))?;
-    rust_autossh::Config::load(&config)?;
-    let bin_path = format!(
-        "\"{}\" service --config \"{}\"",
-        exe.display(),
-        config.display()
-    );
-    sc_command([
-        "create",
-        SERVICE_NAME,
-        &format!("binPath= {bin_path}"),
-        "start= auto",
-        "DisplayName= rust-autossh",
-    ])?;
-    sc_command(["description", SERVICE_NAME, "OpenSSH tunnel supervisor"])
-}
-
-#[cfg(not(windows))]
-fn install_service(_config: PathBuf) -> Result<()> {
-    bail!("Windows service management is only available on Windows")
-}
-
-#[cfg(windows)]
-fn sc_command<const N: usize>(arguments: [&str; N]) -> Result<()> {
-    let status = Command::new("sc.exe")
-        .args(arguments)
-        .status()
-        .context("cannot run sc.exe; use an elevated PowerShell")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("sc.exe exited with {status}")
-    }
-}
-
-#[cfg(not(windows))]
-fn sc_command<const N: usize>(_arguments: [&str; N]) -> Result<()> {
-    bail!("Windows service management is only available on Windows")
 }
 
 const EXAMPLE_CONFIG: &str = r##"# Each [[connections]] block starts one ssh process with any number of -L / -R forwards.
