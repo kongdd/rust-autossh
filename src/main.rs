@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -84,7 +84,7 @@ fn edit_config(config: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn ensure_config(path: &PathBuf) -> Result<()> {
+fn ensure_config(path: &Path) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
@@ -108,7 +108,7 @@ fn run_foreground(config: PathBuf) -> Result<()> {
     ensure_config(&config)?;
     let stop = Arc::new(AtomicBool::new(false));
     let signal = stop.clone();
-    ctrlc::set_handler(move || signal.store(true, std::sync::atomic::Ordering::SeqCst))
+    ctrlc::set_handler(move || signal.store(true, std::sync::atomic::Ordering::Relaxed))
         .context("cannot install Ctrl+C handler")?;
     rust_autossh::run(config, stop)
 }
@@ -163,19 +163,29 @@ mod windows_service_host {
     fn service_main(_arguments: Vec<OsString>) {
         let stop = Arc::new(AtomicBool::new(false));
         let control_stop = stop.clone();
+        let path = CONFIG_PATH
+            .get()
+            .expect("configuration path missing")
+            .clone();
         let status = match service_control_handler::register(SERVICE_NAME, move |event| match event
         {
             ServiceControl::Stop | ServiceControl::Shutdown => {
-                control_stop.store(true, Ordering::SeqCst);
+                control_stop.store(true, Ordering::Relaxed);
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         }) {
             Ok(status) => status,
-            Err(_) => return,
+            Err(error) => {
+                report_service_error(
+                    &path,
+                    &anyhow::anyhow!("cannot register service control handler: {error}"),
+                );
+                return;
+            }
         };
-        let _ = status.set_service_status(ServiceStatus {
+        if let Err(error) = status.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Running,
             controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
@@ -183,11 +193,13 @@ mod windows_service_host {
             checkpoint: 0,
             wait_hint: Duration::default(),
             process_id: None,
-        });
-        let path = CONFIG_PATH
-            .get()
-            .expect("configuration path missing")
-            .clone();
+        }) {
+            report_service_error(
+                &path,
+                &anyhow::anyhow!("cannot report running service status: {error}"),
+            );
+            return;
+        }
         let exit_code = match rust_autossh::run(path.clone(), stop) {
             Ok(()) => ServiceExitCode::NO_ERROR,
             Err(error) => {
@@ -195,7 +207,7 @@ mod windows_service_host {
                 ServiceExitCode::ServiceSpecific(1)
             }
         };
-        let _ = status.set_service_status(ServiceStatus {
+        if let Err(error) = status.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Stopped,
             controls_accepted: ServiceControlAccept::empty(),
@@ -203,7 +215,12 @@ mod windows_service_host {
             checkpoint: 0,
             wait_hint: Duration::default(),
             process_id: None,
-        });
+        }) {
+            report_service_error(
+                &path,
+                &anyhow::anyhow!("cannot report stopped service status: {error}"),
+            );
+        }
     }
 
     fn report_service_error(config_path: &Path, error: &anyhow::Error) {
@@ -230,6 +247,7 @@ fn install_service(config: PathBuf) -> Result<()> {
     let config = config
         .canonicalize()
         .with_context(|| format!("cannot resolve configuration {}", config.display()))?;
+    rust_autossh::Config::load(&config)?;
     let bin_path = format!(
         "\"{}\" service --config \"{}\"",
         exe.display(),
@@ -272,7 +290,8 @@ const EXAMPLE_CONFIG: &str = r##"# Each [[connections]] block starts one ssh pro
 # Edit this file, then run `rust-autossh run` again.
 
 [[connections]]
-name = "myhost"
+name = "primary"
+host = "myhost"
 forwards = [
   { mode = "local",  forward = "8080:127.0.0.1:8080" },
   { mode = "remote", forward = "10022:127.0.0.1:22" },

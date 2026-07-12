@@ -4,7 +4,8 @@
 # Authentication uses ordinary ~/.ssh/config (keys, agent, Host aliases).
 
 [[connections]]
-name = "c005"
+name = "home-server"
+host = "c005"
 forwards = [
   { mode = "local",  forward = "0.0.0.0:8080:127.0.0.1:8080" },
   { mode = "remote", forward = "1081:192.168.31.1:7890" },
@@ -20,7 +21,8 @@ keepalive = { interval = 360, count_max = 10, connect_timeout = 15 }
 # extra_args = ["-i", "/home/alice/.ssh/id_ed25519"]
 
 # [[connections]]
-# name = "c006"
+# name = "backup-server"
+# host = "c006"
 # forwards = [
 #   { mode = "remote", forward = "10022:127.0.0.1:22" },
 # ]

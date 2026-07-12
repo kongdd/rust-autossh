@@ -41,7 +41,7 @@ pub fn args(connection: &ConnectionConfig) -> Vec<String> {
         );
         args.push(forward.forward.clone());
     }
-    args.push(connection.name.clone());
+    args.push(connection.destination().to_owned());
     args
 }
 

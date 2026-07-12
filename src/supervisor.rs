@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::BufRead,
     io::BufReader,
@@ -12,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, ConnectionConfig};
 use crate::logger::Logger;
@@ -22,42 +23,69 @@ const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Runs all enabled connections until `stop` is set. Configuration changes
-/// restart all workers with the latest valid definitions.
+/// restart only changed workers; a log configuration change restarts all workers.
 pub fn run(config_path: PathBuf, stop: Arc<AtomicBool>) -> Result<()> {
-    let mut config = Config::load(&config_path)?;
-    let mut logger = Logger::new(&config_path, &config.log)?;
+    let config = Config::load(&config_path)?;
+    let mut log_config = config.log.clone();
+    let mut logger = Logger::new(&config_path, &log_config)?;
     logger.info(format!(
         "loaded {} connection(s) from {}",
         config.connections.len(),
         config_path.display()
     ));
-    let mut supervisor = Supervisor::start(config, logger.clone())?;
+    let mut supervisor = Supervisor::start(config.connections, logger.clone())?;
     let mut snapshot = config_snapshot(&config_path);
     let mut last_reload_error = None;
 
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.load(Ordering::Relaxed) {
         thread::sleep(CONFIG_POLL_INTERVAL);
         let current_snapshot = config_snapshot(&config_path);
-        if current_snapshot != snapshot {
-            snapshot = current_snapshot;
-            match Config::load(&config_path) {
-                Ok(new_config) => {
-                    logger.info("configuration changed; restarting connection workers");
-                    supervisor.stop_and_join();
-                    config = new_config;
-                    logger = Logger::new(&config_path, &config.log)?;
-                    supervisor = Supervisor::start(config.clone(), logger.clone())?;
-                    last_reload_error = None;
-                }
+        if current_snapshot == snapshot {
+            continue;
+        }
+        snapshot = current_snapshot;
+
+        let new_config = match Config::load(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                report_reload_error(&logger, &mut last_reload_error, error.to_string());
+                continue;
+            }
+        };
+        let log_changed = new_config.log != log_config;
+        let new_logger = if log_changed {
+            match Logger::new(&config_path, &new_config.log) {
+                Ok(logger) => logger,
                 Err(error) => {
-                    let message = error.to_string();
-                    if last_reload_error.as_deref() != Some(message.as_str()) {
-                        logger.error(format!(
-                            "configuration reload rejected; keeping current connections: {message}"
-                        ));
-                        last_reload_error = Some(message);
-                    }
+                    report_reload_error(
+                        &logger,
+                        &mut last_reload_error,
+                        format!("cannot apply log configuration: {error:#}"),
+                    );
+                    continue;
                 }
+            }
+        } else {
+            logger.clone()
+        };
+
+        logger.info("configuration changed; reconciling connection workers");
+        let result =
+            supervisor.reconfigure(new_config.connections, new_logger.clone(), log_changed);
+        if log_changed {
+            log_config = new_config.log;
+            logger = new_logger;
+        }
+        match result {
+            Ok(()) => last_reload_error = None,
+            Err(error) => {
+                // Retry transient worker-start failures without requiring another file edit.
+                snapshot = None;
+                report_reload_error(
+                    &logger,
+                    &mut last_reload_error,
+                    format!("cannot apply all connection changes: {error:#}"),
+                );
             }
         }
     }
@@ -66,48 +94,146 @@ pub fn run(config_path: PathBuf, stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
+fn report_reload_error(logger: &Logger, previous: &mut Option<String>, message: String) {
+    if previous.as_deref() != Some(&message) {
+        logger.error(format!(
+            "configuration reload rejected; keeping unaffected connections: {message}"
+        ));
+        *previous = Some(message);
+    }
+}
+
 pub(crate) fn config_snapshot(path: &Path) -> Option<Vec<u8>> {
     fs::read(path).ok()
 }
 
-struct Supervisor {
+struct Worker {
+    config: ConnectionConfig,
     stop: Arc<AtomicBool>,
-    workers: Vec<thread::JoinHandle<()>>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl Worker {
+    fn spawn(connection: ConnectionConfig, logger: Logger) -> Result<Self> {
+        let name = connection.name.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let handle = thread::Builder::new()
+            .name(format!("connection-{name}"))
+            .spawn({
+                let worker_config = connection.clone();
+                move || supervise_connection(worker_config, worker_stop, logger)
+            })
+            .with_context(|| format!("cannot start worker for connection {name}"))?;
+        Ok(Self {
+            config: connection,
+            stop,
+            handle,
+        })
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    fn join(self) {
+        let _ = self.handle.join();
+    }
+}
+
+struct Supervisor {
+    workers: HashMap<String, Worker>,
 }
 
 impl Supervisor {
-    fn start(config: Config, logger: Logger) -> Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut workers = Vec::new();
-        for connection in config
-            .connections
+    fn start(connections: Vec<ConnectionConfig>, logger: Logger) -> Result<Self> {
+        let mut supervisor = Self {
+            workers: HashMap::new(),
+        };
+        for connection in connections
             .into_iter()
             .filter(|connection| connection.enabled)
         {
             let name = connection.name.clone();
-            let worker_stop = Arc::clone(&stop);
-            let worker_logger = logger.clone();
-            let worker = thread::Builder::new()
-                .name(format!("connection-{name}"))
-                .spawn(move || supervise_connection(connection, worker_stop, worker_logger))
-                .with_context(|| format!("cannot start worker for connection {name}"))?;
-            workers.push(worker);
+            match Worker::spawn(connection, logger.clone()) {
+                Ok(worker) => {
+                    supervisor.workers.insert(name, worker);
+                }
+                Err(error) => {
+                    supervisor.stop_all();
+                    return Err(error);
+                }
+            }
         }
-        Ok(Self { stop, workers })
+        Ok(supervisor)
     }
 
-    fn stop_and_join(self) {
-        self.stop.store(true, Ordering::SeqCst);
-        for worker in self.workers {
-            let _ = worker.join();
+    fn reconfigure(
+        &mut self,
+        connections: Vec<ConnectionConfig>,
+        logger: Logger,
+        force_restart: bool,
+    ) -> Result<()> {
+        let desired: HashMap<_, _> = connections
+            .into_iter()
+            .filter(|connection| connection.enabled)
+            .map(|connection| (connection.name.clone(), connection))
+            .collect();
+        let obsolete: Vec<_> = self
+            .workers
+            .iter()
+            .filter(|(name, worker)| force_restart || desired.get(*name) != Some(&worker.config))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let stopped: Vec<_> = obsolete
+            .into_iter()
+            .filter_map(|name| self.workers.remove(&name))
+            .collect();
+        for worker in &stopped {
+            worker.request_stop();
         }
+        for worker in stopped {
+            worker.join();
+        }
+
+        let mut errors = Vec::new();
+        for (name, connection) in desired {
+            if self.workers.contains_key(&name) {
+                continue;
+            }
+            match Worker::spawn(connection, logger.clone()) {
+                Ok(worker) => {
+                    self.workers.insert(name, worker);
+                }
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!(errors.join("; "))
+        }
+    }
+
+    fn stop_all(&mut self) {
+        let workers: Vec<_> = self.workers.drain().map(|(_, worker)| worker).collect();
+        for worker in &workers {
+            worker.request_stop();
+        }
+        for worker in workers {
+            worker.join();
+        }
+    }
+
+    fn stop_and_join(mut self) {
+        self.stop_all();
     }
 }
 
 fn supervise_connection(connection: ConnectionConfig, stop: Arc<AtomicBool>, logger: Logger) {
     let mut delay = connection.retry.initial_seconds;
     logger.info(format!("{}: supervisor started", connection.name));
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.load(Ordering::Relaxed) {
         let started = Instant::now();
         let mut shutdown = false;
         match ssh::spawn(&connection) {
@@ -168,7 +294,7 @@ fn wait_child(child: &mut Child, stop: &AtomicBool) -> Result<Option<std::proces
         if let Some(status) = child.try_wait().context("cannot poll ssh process")? {
             return Ok(Some(status));
         }
-        if stop.load(Ordering::SeqCst) {
+        if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
         thread::sleep(CHILD_POLL_INTERVAL);
@@ -207,10 +333,60 @@ fn terminate_child(child: &mut Child, name: &str, logger: &Logger) {
 fn sleep_until_stopped(delay: Duration, stop: &AtomicBool) -> bool {
     let deadline = Instant::now() + delay;
     while Instant::now() < deadline {
-        if stop.load(Ordering::SeqCst) {
+        if stop.load(Ordering::Relaxed) {
             return true;
         }
         thread::sleep((deadline - Instant::now()).min(CHILD_POLL_INTERVAL));
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ForwardConfig, ForwardMode, KeepaliveConfig, RetryConfig};
+    use crate::logger::Logger;
+
+    fn connection() -> ConnectionConfig {
+        ConnectionConfig {
+            name: "test".into(),
+            host: None,
+            enabled: true,
+            ssh_path: Some("ssh-command-that-does-not-exist".into()),
+            keepalive: KeepaliveConfig::default(),
+            retry: RetryConfig::default(),
+            extra_args: Vec::new(),
+            forwards: vec![ForwardConfig {
+                mode: ForwardMode::Local,
+                forward: "8080:127.0.0.1:8080".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn reconfigure_restarts_only_changed_workers() {
+        let logger = Logger::new(Path::new("config.toml"), &Default::default()).unwrap();
+        let original = connection();
+        let mut supervisor = Supervisor::start(vec![original.clone()], logger.clone()).unwrap();
+        let first_thread = supervisor.workers["test"].handle.thread().id();
+
+        supervisor
+            .reconfigure(vec![original.clone()], logger.clone(), false)
+            .unwrap();
+        assert_eq!(
+            first_thread,
+            supervisor.workers["test"].handle.thread().id()
+        );
+
+        let mut changed = original;
+        changed.forwards[0].forward = "8081:127.0.0.1:8081".into();
+        supervisor
+            .reconfigure(vec![changed], logger, false)
+            .unwrap();
+        assert_ne!(
+            first_thread,
+            supervisor.workers["test"].handle.thread().id()
+        );
+        supervisor.stop_and_join();
+    }
 }

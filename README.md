@@ -30,7 +30,7 @@ Copy and edit [`config.example.toml`](config.example.toml), then validate it. Th
 .\rust-autossh.exe run --config %USERPROFILE%\.config\autossh\config.toml
 ```
 
-Each `[[connections]]` block creates one `ssh` process; `name` doubles as both the log identifier and the SSH destination (host/IP/alias). Its `forwards` array may mix any number of `-L` and `-R` mappings. SSH host aliases and all ordinary settings in `%USERPROFILE%\.ssh\config` work unchanged. Configure key-based authentication or `ssh-agent`; password prompts are disabled by `BatchMode=yes`.
+Each `[[connections]]` block creates one `ssh` process. `name` is its unique log identifier; optional `host` is the SSH destination (host/IP/alias) and defaults to `name` for backward compatibility. Its `forwards` array may mix any number of `-L` and `-R` mappings. SSH host aliases and all ordinary settings in `%USERPROFILE%\.ssh\config` work unchanged. Configure key-based authentication or `ssh-agent`; password prompts are disabled by `BatchMode=yes`.
 
 `extra_args` is an array of individual arguments, not one shell command. For example:
 
@@ -65,7 +65,7 @@ sc.exe failure rust-autossh reset= 86400 actions= restart/5000/restart/5000/rest
 
 ## Operational notes
 
-- Config content is checked every two seconds. A reload stops old `ssh` children and starts latest valid connection definitions. Apply changes atomically (write a temporary file, then rename it) to avoid a transient syntax error.
+- Config content is checked every two seconds. A reload restarts only changed connections; changing log settings restarts all connections. Apply changes atomically (write a temporary file, then rename it) to avoid a transient syntax error.
 - `ExitOnForwardFailure=yes` is especially important for detecting a failed initial forwarding request.
 - A remote forward may still require `GatewayPorts` / `AllowTcpForwarding` on the SSH server.
 - Tunnel stdout/stderr are discarded. Supervisor events are written to stderr and, when configured, to the rotating log file. A service startup failure is additionally written to `rust-autossh.service-error.log` beside config.

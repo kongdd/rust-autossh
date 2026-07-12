@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// Top-level TOML configuration.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -19,11 +19,13 @@ pub struct Config {
 
 /// One OpenSSH process connected to one host. A connection can own several
 /// local and remote forwards, sharing its keepalive and retry settings.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionConfig {
-    /// Log identifier and SSH destination host (`user@host` or Host alias).
+    /// Unique log identifier.
     pub name: String,
+    /// SSH destination (`user@host` or Host alias). Defaults to `name` for compatibility.
+    pub host: Option<String>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     /// An optional explicit path to ssh (ssh.exe on Windows).
@@ -37,7 +39,7 @@ pub struct ConnectionConfig {
     pub forwards: Vec<ForwardConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardConfig {
     /// `remote` → `ssh -R`; `local` → `ssh -L`.
@@ -53,7 +55,7 @@ pub enum ForwardMode {
     Remote,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KeepaliveConfig {
     #[serde(default = "default_keepalive_interval")]
@@ -64,7 +66,7 @@ pub struct KeepaliveConfig {
     pub connect_timeout: u64,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     #[serde(default = "default_retry_initial")]
@@ -75,7 +77,7 @@ pub struct RetryConfig {
     pub stable_seconds: u64,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
     pub file: Option<PathBuf>,
@@ -129,6 +131,12 @@ impl Default for RetryConfig {
     }
 }
 
+impl ConnectionConfig {
+    pub fn destination(&self) -> &str {
+        self.host.as_deref().unwrap_or(&self.name)
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)
@@ -147,6 +155,9 @@ impl Config {
         for connection in &self.connections {
             if connection.name.trim().is_empty() {
                 bail!("connection name must not be empty");
+            }
+            if connection.destination().trim().is_empty() {
+                bail!("connection {} has an empty host", connection.name);
             }
             if connection.forwards.is_empty() {
                 bail!("connection {} has no forwards", connection.name);

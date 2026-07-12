@@ -14,7 +14,8 @@ mod tests {
 
     fn connection() -> ConnectionConfig {
         ConnectionConfig {
-            name: "user@example.test".into(),
+            name: "primary".into(),
+            host: Some("user@example.test".into()),
             enabled: true,
             ssh_path: None,
             keepalive: KeepaliveConfig::default(),
@@ -46,6 +47,13 @@ mod tests {
                 .any(|part| part == ["-R", "10022:127.0.0.1:22"])
         );
         assert_eq!(args[args.len() - 1], "user@example.test");
+    }
+
+    #[test]
+    fn name_remains_the_default_destination() {
+        let mut connection = connection();
+        connection.host = None;
+        assert_eq!(super::ssh::args(&connection).last().unwrap(), "primary");
     }
 
     #[test]
