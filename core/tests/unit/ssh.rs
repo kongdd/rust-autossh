@@ -35,6 +35,10 @@ fn creates_multiple_ssh_forward_arguments() {
         args.windows(2)
             .any(|part| part == ["-R", "10022:127.0.0.1:22"])
     );
+    assert!(
+        args.windows(2)
+            .any(|part| part == ["-o", "LogLevel=DEBUG1"])
+    );
     assert_eq!(args[args.len() - 1], "user@example.test");
 }
 

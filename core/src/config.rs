@@ -5,10 +5,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level TOML configuration.
-#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -19,7 +19,7 @@ pub struct Config {
 
 /// One OpenSSH process connected to one host. A connection can own several
 /// local and remote forwards, sharing its keepalive and retry settings.
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionConfig {
     /// Unique log identifier.
@@ -39,7 +39,7 @@ pub struct ConnectionConfig {
     pub forwards: Vec<ForwardConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardConfig {
     /// `remote` → `ssh -R`; `local` → `ssh -L`.
@@ -48,14 +48,14 @@ pub struct ForwardConfig {
     pub forward: String,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ForwardMode {
     Local,
     Remote,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KeepaliveConfig {
     #[serde(default = "default_keepalive_interval")]
@@ -66,7 +66,7 @@ pub struct KeepaliveConfig {
     pub connect_timeout: u64,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     #[serde(default = "default_retry_initial")]
@@ -77,7 +77,7 @@ pub struct RetryConfig {
     pub stable_seconds: u64,
 }
 
-#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
     pub file: Option<PathBuf>,
@@ -138,6 +138,22 @@ impl Config {
             toml::from_str(&text).with_context(|| format!("invalid TOML in {}", path.display()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Serialises to TOML and writes atomically (write to temp, rename) so that a partial
+    /// edit can never leave an unreadable configuration on disk.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        let body = toml::to_string_pretty(self)
+            .with_context(|| format!("cannot serialise configuration for {}", path.display()))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+        let temp = path.with_extension("toml.tmp");
+        fs::write(&temp, body).with_context(|| format!("cannot write {}", temp.display()))?;
+        fs::rename(&temp, path)
+            .with_context(|| format!("cannot rename {} to {}", temp.display(), path.display()))?;
+        Ok(())
     }
 
     pub(crate) fn validate(&self) -> Result<()> {

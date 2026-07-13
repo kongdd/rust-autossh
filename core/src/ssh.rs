@@ -29,6 +29,8 @@ pub fn args(connection: &ConnectionConfig) -> Vec<String> {
         format!("ServerAliveInterval={}", connection.keepalive.interval),
         "-o".into(),
         format!("ServerAliveCountMax={}", connection.keepalive.count_max),
+        "-o".into(),
+        "LogLevel=DEBUG1".into(),
     ];
     args.extend(connection.extra_args.clone());
     for forward in &connection.forwards {

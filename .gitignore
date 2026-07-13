@@ -2,3 +2,4 @@
 *.log
 *.log.1
 /.pi-subagents/
+*lock*

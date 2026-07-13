@@ -85,7 +85,7 @@ fn ensure_config(path: &Path) -> Result<()> {
 
 fn check_config(config: PathBuf) -> Result<()> {
     ensure_config(&config)?;
-    let config = rust_autossh::Config::load(&config)?;
+    let config = autossh_core::Config::load(&config)?;
     println!("valid: {} connection(s)", config.connections.len());
     Ok(())
 }
@@ -96,7 +96,7 @@ fn run_foreground(config: PathBuf) -> Result<()> {
     let signal = stop.clone();
     ctrlc::set_handler(move || signal.store(true, std::sync::atomic::Ordering::Relaxed))
         .context("cannot install Ctrl+C handler")?;
-    rust_autossh::run(config, stop)
+    autossh_core::run(config, stop)
 }
 
 #[cfg(windows)]
@@ -186,7 +186,7 @@ mod windows_service_host {
             );
             return;
         }
-        let exit_code = match rust_autossh::run(path.clone(), stop) {
+        let exit_code = match autossh_core::run(path.clone(), stop) {
             Ok(()) => ServiceExitCode::NO_ERROR,
             Err(error) => {
                 report_service_error(&path, &error);

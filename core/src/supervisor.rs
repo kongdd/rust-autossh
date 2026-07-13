@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use crate::config::{Config, ConnectionConfig};
 use crate::logger::Logger;
 use crate::ssh;
+use crate::ssh_log::{SshStderrAnnotator, describe_configured_forwards};
 
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -235,12 +236,13 @@ fn supervise_connection(connection: ConnectionConfig, stop: Arc<AtomicBool>, log
         match ssh::spawn(&connection) {
             Ok(mut child) => {
                 logger.info(format!(
-                    "{}: ssh process started (pid {})",
+                    "{}: ssh process started (pid {}); destination={}; forwards=[{}]",
                     connection.name,
-                    child.id()
+                    child.id(),
+                    connection.destination(),
+                    describe_configured_forwards(&connection)
                 ));
-                let stderr_reader =
-                    capture_stderr(&mut child, connection.name.clone(), logger.clone());
+                let stderr_reader = capture_stderr(&mut child, connection.clone(), logger.clone());
                 match wait_child(&mut child, &stop) {
                     Ok(Some(status)) => {
                         logger.warn(format!("{}: ssh exited with {status}", connection.name))
@@ -299,16 +301,22 @@ fn wait_child(child: &mut Child, stop: &AtomicBool) -> Result<Option<std::proces
 
 fn capture_stderr(
     child: &mut Child,
-    name: String,
+    connection: ConnectionConfig,
     logger: Logger,
 ) -> Option<thread::JoinHandle<()>> {
     let stderr = child.stderr.take()?;
+    let name = connection.name.clone();
     thread::Builder::new()
         .name(format!("ssh-stderr-{name}"))
         .spawn(move || {
+            let mut annotator = SshStderrAnnotator::new(&connection);
             for line in BufReader::new(stderr).lines() {
                 match line {
-                    Ok(line) => logger.warn(format!("{name}: ssh: {line}")),
+                    Ok(line) => {
+                        if let Some(line) = annotator.annotate(&line) {
+                            logger.warn(format!("{name}: ssh: {line}"));
+                        }
+                    }
                     Err(error) => {
                         logger.warn(format!("{name}: cannot read ssh stderr: {error}"));
                         break;
