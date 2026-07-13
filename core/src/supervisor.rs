@@ -15,6 +15,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+#[cfg(windows)]
+use encoding_rs::{BIG5, EUC_KR, Encoding, GBK, SHIFT_JIS, WINDOWS_1252};
+#[cfg(windows)]
+use std::sync::OnceLock;
+#[cfg(windows)]
+use windows_sys::Win32::Globalization::GetACP;
+
 use crate::config::{Config, ConnectionConfig};
 use crate::logger::Logger;
 use crate::ssh;
@@ -310,12 +317,17 @@ fn capture_stderr(
         .name(format!("ssh-stderr-{name}"))
         .spawn(move || {
             let mut annotator = SshStderrAnnotator::new(&connection);
-            for line in BufReader::new(stderr).lines() {
-                match line {
-                    Ok(line) => {
+            let mut reader = BufReader::new(stderr);
+            let mut bytes = Vec::new();
+            loop {
+                match reader.read_until(b'\n', &mut bytes) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = decode_ssh_stderr(&bytes);
                         if let Some(line) = annotator.annotate(&line) {
                             logger.warn(format!("{name}: ssh: {line}"));
                         }
+                        bytes.clear();
                     }
                     Err(error) => {
                         logger.warn(format!("{name}: cannot read ssh stderr: {error}"));
@@ -325,6 +337,44 @@ fn capture_stderr(
             }
         })
         .ok()
+}
+
+/// Decode one stderr record. Windows OpenSSH writes localised diagnostics in
+/// the system ANSI code page when stderr is a pipe; `LC_ALL=C` does not change
+/// that behaviour. Prefer UTF-8 (the usual remote-server encoding), then use
+/// the Windows ANSI code page for local SSH diagnostics.
+fn decode_ssh_stderr(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    if let Ok(line) = std::str::from_utf8(bytes) {
+        return line.to_owned();
+    }
+
+    #[cfg(windows)]
+    {
+        let (line, _, _) = windows_ansi_encoding().decode(bytes);
+        return line.into_owned();
+    }
+
+    #[cfg(not(windows))]
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(windows)]
+fn windows_ansi_encoding() -> &'static Encoding {
+    static ENCODING: OnceLock<&'static Encoding> = OnceLock::new();
+    *ENCODING.get_or_init(|| {
+        let code_page = unsafe { GetACP() };
+        match code_page {
+            932 => SHIFT_JIS,
+            936 => GBK,
+            949 => EUC_KR,
+            950 => BIG5,
+            1250..=1258 => Encoding::for_label(format!("windows-{code_page}").as_bytes())
+                .unwrap_or(WINDOWS_1252),
+            _ => WINDOWS_1252,
+        }
+    })
 }
 
 fn terminate_child(child: &mut Child, name: &str, logger: &Logger) {

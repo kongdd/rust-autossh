@@ -89,26 +89,12 @@ fn parse_args() -> PathBuf {
     path
 }
 
-/// Default config path.
-///
-/// Linux/macOS: `$HOME/.config/autossh/config.toml` (XDG Base Directory).
-/// Windows: `%APPDATA%\autossh\config.toml`. USERPROFILE is *not* a valid
-/// fallback on Windows because `~\.config` does not exist by default and
-/// silently creates an inaccessible directory the first time the UI runs.
+/// Default config path. Delegates to `autossh_core::default_config_path` so the
+/// `rust-autossh` CLI and the `autossh-ui` GUI resolve the same path on every
+/// platform: `~/.config/autossh/config.toml` (`%USERPROFILE%\.config\autossh\config.toml`
+/// on Windows). The `.config` directory is created on first run by `ensure_config`.
 pub fn default_path() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("autossh").join("config.toml");
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-        return PathBuf::from(home).join(".config").join("autossh").join("config.toml");
-    }
-    #[allow(unreachable_code)]
-    PathBuf::from(".").join("autossh").join("config.toml")
+    autossh_core::default_config_path()
 }
 
 // ─── fonts and theme ──────────────────────────────────────────────────────────
@@ -159,19 +145,25 @@ fn install_windows_icon_fonts(ctx: &egui::Context) {
 #[cfg(not(target_os = "windows"))]
 fn install_windows_icon_fonts(_ctx: &egui::Context) {}
 
-/// Visuals tuned for a darker palette than the OS default so the colour-coded
-/// log badges stay legible.
+/// Visuals tuned for a palette that keeps colour-coded log badges legible
+/// without sinking the whole window into near-black.
 fn visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
     let visuals = &mut v;
-    visuals.override_text_color = Some(Color32::from_rgb(225, 228, 235));
+    visuals.override_text_color = Some(Color32::from_rgb(235, 238, 245));
     visuals.window_rounding = egui::Rounding::same(6.0);
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(20, 22, 28);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(34, 38, 46);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 54, 64);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(60, 70, 84);
-    visuals.selection.bg_fill = Color32::from_rgb(20, 100, 130);
-    visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(0, 220, 220));
-    visuals.hyperlink_color = Color32::from_rgb(0, 220, 220);
+    // Softer dark palette so connection entries / globals cards stay legible
+    // without sinking the whole window into near-black.
+    visuals.window_fill = Color32::from_rgb(37, 42, 51);
+    visuals.panel_fill = Color32::from_rgb(37, 42, 51);
+    visuals.extreme_bg_color = Color32::from_rgb(27, 31, 38);
+    visuals.faint_bg_color = Color32::from_rgb(58, 66, 82);
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(46, 52, 65);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(60, 68, 88);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(80, 90, 114);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(100, 112, 138);
+    visuals.selection.bg_fill = Color32::from_rgb(30, 128, 168);
+    visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(34, 214, 226));
+    visuals.hyperlink_color = Color32::from_rgb(34, 214, 226);
     v
 }

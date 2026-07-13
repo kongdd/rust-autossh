@@ -17,9 +17,13 @@ use std::{
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-/// Do not create a console window for a child of the Windows GUI process.
+/// Do not create or attach a console window for the supervisor process.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
+const NO_CONSOLE_FLAGS: u32 = CREATE_NO_WINDOW | DETACHED_PROCESS;
 
 use anyhow::{Context, Result};
 
@@ -73,7 +77,7 @@ impl SupervisorHandle {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(NO_CONSOLE_FLAGS);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("cannot start supervisor at {}", binary.display()))?;

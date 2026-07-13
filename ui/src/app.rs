@@ -20,14 +20,26 @@ use autossh_core::{Config, KeepaliveConfig, RetryConfig};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::log::{
-    FG_DIM, FG_ERROR, FG_MUTED, FG_PRIMARY, FG_SUCCESS, FG_WARNING, LOG_BUFFER_LIMIT,
-    LogEntry, LogScroll, format_unix_ts, is_displayable,
+    FG_DIM, FG_ERROR, FG_MUTED, FG_PRIMARY, FG_SUCCESS, FG_WARNING, LOG_BUFFER_LIMIT, LogEntry,
+    LogScroll, format_unix_ts, is_displayable,
 };
 use crate::modal::{
     AddDialogState, CloseAction, EditDialogState, EditableForward, GlobalGroup, ImportDialogState,
-    Modal, SshImportState, run_add_dialog_ui, run_edit_dialog_ui, run_import_dialog_ui,
-    run_ssh_import_dialog_ui, state_from_connection,
+    Modal, SshImportState, field_into_port, run_add_dialog_ui, run_edit_dialog_ui,
+    run_import_dialog_ui, run_ssh_import_dialog_ui, state_from_connection,
 };
+
+/// Map an editable dialog field to its `Option<String>` storage form: an empty
+/// input writes `None` (fallback to default behaviour), a non-empty value is
+/// trimmed and wrapped. Used for `user` and `password`.
+fn field_into_option(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
 use crate::supervisor::{SupervisorHandle, locate_supervisor};
 
 /// Which pane the centre area is showing. Toggled via the segmented control
@@ -400,47 +412,81 @@ impl AutosshApp {
                                 (Color32::from_rgb(24, 28, 34), 0.5, FG_DIM)
                             };
                             egui::Frame::group(ui.style())
-                                .fill(fill).stroke(egui::Stroke::new(sw, sc))
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(sw, sc))
                                 .rounding(egui::Rounding::same(4.0))
                                 .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                                 .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    // checkbox
-                                    let mut cb = self.checked_conn.contains(&i);
-                                    if ui.checkbox(&mut cb, "")
-                                        .on_hover_text("Select for batch deletion")
-                                        .changed()
-                                    {
-                                        if cb { self.checked_conn.insert(i); }
-                                        else { self.checked_conn.remove(&i); }
-                                    }
-                                    // status dot
-                                    let running = supervisor_running && conn.enabled;
-                                    ui.colored_label(
-                                        if running { FG_SUCCESS } else { FG_MUTED }, "●",
-                                    );
-                                    // clickable details (select on click, edit on double-click)
-                                    let mut mk = |text: RichText| {
-                                        ui.add(egui::Label::new(text).sense(egui::Sense::click()))
-                                    };
-                                    let r1 = mk(RichText::new(&conn.name).strong());
-                                    let r2 = mk(RichText::new(conn.destination()).small().color(FG_MUTED));
-                                    let r3 = mk(RichText::new(format!("{} forwards", conn.forwards.len()))
-                                        .small().color(FG_PRIMARY));
-                                    let clicked = r1.clicked() || r2.clicked() || r3.clicked();
-                                    let dbl = r1.double_clicked() || r2.double_clicked() || r3.double_clicked();
-                                    if clicked { self.selected_connection = i; }
-                                    if dbl { edit_at = Some(i); }
+                                    ui.horizontal(|ui| {
+                                        // checkbox
+                                        let mut cb = self.checked_conn.contains(&i);
+                                        if ui
+                                            .checkbox(&mut cb, "")
+                                            .on_hover_text("Select for batch deletion")
+                                            .changed()
+                                        {
+                                            if cb {
+                                                self.checked_conn.insert(i);
+                                            } else {
+                                                self.checked_conn.remove(&i);
+                                            }
+                                        }
+                                        // status dot
+                                        let running = supervisor_running && conn.enabled;
+                                        ui.colored_label(
+                                            if running { FG_SUCCESS } else { FG_MUTED },
+                                            "●",
+                                        );
+                                        // clickable details (select on click, edit on double-click)
+                                        let mut mk = |text: RichText| {
+                                            ui.add(
+                                                egui::Label::new(text).sense(egui::Sense::click()),
+                                            )
+                                        };
+                                        let r1 = mk(RichText::new(&conn.name).strong());
+                                        let destination = match conn.port {
+                                            Some(port) => format!("{}:{port}", conn.destination()),
+                                            None => conn.destination(),
+                                        };
+                                        let details = match conn.description.as_deref() {
+                                            Some(description) if !description.trim().is_empty() => {
+                                                format!("{destination}  ·  {description}")
+                                            }
+                                            _ => destination,
+                                        };
+                                        let r2 = mk(RichText::new(details).small().color(FG_MUTED));
+                                        let r3 = mk(RichText::new(format!(
+                                            "{} forwards",
+                                            conn.forwards.len()
+                                        ))
+                                        .small()
+                                        .color(FG_PRIMARY));
+                                        let clicked = r1.clicked() || r2.clicked() || r3.clicked();
+                                        let dbl = r1.double_clicked()
+                                            || r2.double_clicked()
+                                            || r3.double_clicked();
+                                        if clicked {
+                                            self.selected_connection = i;
+                                        }
+                                        if dbl {
+                                            edit_at = Some(i);
+                                        }
 
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let label = if running { "■  Stop" } else { "▶  Start" };
-                                            if ui.small_button(label).clicked() { toggle_at = Some(i); }
-                                        },
-                                    );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let label = if running {
+                                                    "■  Stop"
+                                                } else {
+                                                    "▶  Start"
+                                                };
+                                                if ui.small_button(label).clicked() {
+                                                    toggle_at = Some(i);
+                                                }
+                                            },
+                                        );
+                                    });
                                 });
-                            });
                             ui.add_space(4.0);
                         }
                     });
@@ -522,14 +568,50 @@ impl AutosshApp {
         // back into a u64. Mixing the two is the bug that turned "30 s" into
         // an un-parseable initial value.
         let keepalive: [(usize, GlobalGroup, (String, String)); 3] = [
-            (0, GlobalGroup::KeepaliveInterval, (format!("{} s", ka.interval), ka.interval.to_string())),
-            (1, GlobalGroup::KeepaliveCount, (ka.count_max.to_string(), ka.count_max.to_string())),
-            (2, GlobalGroup::KeepaliveTimeout, (format!("{} s", ka.connect_timeout), ka.connect_timeout.to_string())),
+            (
+                0,
+                GlobalGroup::KeepaliveInterval,
+                (format!("{} s", ka.interval), ka.interval.to_string()),
+            ),
+            (
+                1,
+                GlobalGroup::KeepaliveCount,
+                (ka.count_max.to_string(), ka.count_max.to_string()),
+            ),
+            (
+                2,
+                GlobalGroup::KeepaliveTimeout,
+                (
+                    format!("{} s", ka.connect_timeout),
+                    ka.connect_timeout.to_string(),
+                ),
+            ),
         ];
         let retry: [(usize, GlobalGroup, (String, String)); 3] = [
-            (3, GlobalGroup::RetryInitial, (format!("{} s", r.initial_seconds), r.initial_seconds.to_string())),
-            (4, GlobalGroup::RetryMaximum, (format!("{} s", r.maximum_seconds), r.maximum_seconds.to_string())),
-            (5, GlobalGroup::RetryStable, (format!("{} s", r.stable_seconds), r.stable_seconds.to_string())),
+            (
+                3,
+                GlobalGroup::RetryInitial,
+                (
+                    format!("{} s", r.initial_seconds),
+                    r.initial_seconds.to_string(),
+                ),
+            ),
+            (
+                4,
+                GlobalGroup::RetryMaximum,
+                (
+                    format!("{} s", r.maximum_seconds),
+                    r.maximum_seconds.to_string(),
+                ),
+            ),
+            (
+                5,
+                GlobalGroup::RetryStable,
+                (
+                    format!("{} s", r.stable_seconds),
+                    r.stable_seconds.to_string(),
+                ),
+            ),
         ];
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -541,16 +623,25 @@ impl AutosshApp {
                         ui.heading(if i == 0 { "Keepalive" } else { "Retry" });
                         ui.add_space(4.0);
                         for (idx, group, (display, edit)) in rows.iter() {
-                            self.render_global_row(ui, *idx, &mut sel, *group, display.clone(), edit.clone());
+                            self.render_global_row(
+                                ui,
+                                *idx,
+                                &mut sel,
+                                *group,
+                                display.clone(),
+                                edit.clone(),
+                            );
                         }
                     });
                 }
             });
             ui.add_space(8.0);
             ui.label(
-                RichText::new("shared by every connection; click to highlight, double-click to edit")
-                    .small()
-                    .color(FG_MUTED),
+                RichText::new(
+                    "shared by every connection; click to highlight, double-click to edit",
+                )
+                .small()
+                .color(FG_MUTED),
             );
             ui.add_space(8.0);
             ui.collapsing("Active connections", |ui| {
@@ -567,8 +658,13 @@ impl AutosshApp {
     }
 
     fn render_global_row(
-        &mut self, ui: &mut egui::Ui, index: usize, selected: &mut usize,
-        group: GlobalGroup, display: String, edit: String,
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        selected: &mut usize,
+        group: GlobalGroup,
+        display: String,
+        edit: String,
     ) {
         let is_sel = *selected == index;
         let (fill, sw, sc) = if is_sel {
@@ -585,7 +681,12 @@ impl AutosshApp {
                 ui.set_width(ui.available_width());
                 ui.vertical(|ui| {
                     ui.label(RichText::new(group.label()).color(FG_MUTED).small());
-                    ui.label(RichText::new(&display).strong().color(FG_PRIMARY).monospace());
+                    ui.label(
+                        RichText::new(&display)
+                            .strong()
+                            .color(FG_PRIMARY)
+                            .monospace(),
+                    );
                 });
             });
         let interact = response.response.interact(egui::Sense::click());
@@ -756,12 +857,17 @@ impl AutosshApp {
             Modal::None => {}
             Modal::Add(state) => {
                 let mut state = state;
+                let name_taken = self
+                    .config
+                    .connections
+                    .iter()
+                    .any(|connection| connection.name.trim() == state.name.trim());
                 egui::Window::new("Add connection")
                     .collapsible(false)
                     .resizable(false)
-                    .default_size([520.0, 460.0])
+                    .default_size([620.0, 430.0])
                     .show(ctx, |ui| {
-                        run_add_dialog_ui(ui, &mut state);
+                        run_add_dialog_ui(ui, &mut state, name_taken);
                     });
                 self.apply_add_dialog_state(state);
             }
@@ -773,12 +879,20 @@ impl AutosshApp {
                     .get(idx)
                     .map(|c| c.name.clone())
                     .unwrap_or_default();
+                let name_taken =
+                    self.config
+                        .connections
+                        .iter()
+                        .enumerate()
+                        .any(|(other_idx, connection)| {
+                            other_idx != idx && connection.name.trim() == state.name.trim()
+                        });
                 egui::Window::new(format!("Edit connection ({} → {})", idx + 1, name))
                     .collapsible(false)
                     .resizable(false)
-                    .default_size([520.0, 460.0])
+                    .default_size([620.0, 430.0])
                     .show(ctx, |ui| {
-                        run_add_dialog_ui(ui, &mut state);
+                        run_add_dialog_ui(ui, &mut state, name_taken);
                     });
                 self.apply_edit_connection_state(idx, state);
             }
@@ -842,16 +956,40 @@ impl AutosshApp {
                 self.modal = Modal::Add(state);
             }
             CloseAction::Commit => {
+                let name = state.name.trim().to_string();
+                if self
+                    .config
+                    .connections
+                    .iter()
+                    .any(|connection| connection.name.trim() == name)
+                {
+                    self.flash(format!("connection name {name:?} already exists"));
+                    self.modal = Modal::Add(state);
+                    return;
+                }
+                let port = match field_into_port(&state.port) {
+                    Ok(port) => port,
+                    Err(message) => {
+                        self.flash(message);
+                        self.modal = Modal::Add(state);
+                        return;
+                    }
+                };
                 let forwards: Vec<_> = state
                     .forwards
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(EditableForward::into_forward)
                     .collect();
                 self.config
                     .connections
                     .push(autossh_core::ConnectionConfig {
-                        name: state.name.trim().to_string(),
+                        name: name.clone(),
+                        description: field_into_option(&state.description),
                         host: Some(state.host.trim().to_string()),
+                        user: field_into_option(&state.user),
+                        password: field_into_option(&state.password),
+                        port,
                         enabled: true,
                         ssh_path: None,
                         keepalive: self.keepalive(),
@@ -861,7 +999,7 @@ impl AutosshApp {
                     });
                 self.dirty = true;
                 self.selected_connection = self.config.connections.len() - 1;
-                self.flash(format!("added {}", state.name.trim()));
+                self.flash(format!("added {name}"));
             }
             CloseAction::Cancel(message) => {
                 self.flash(message);
@@ -884,16 +1022,43 @@ impl AutosshApp {
                     self.flash("connection vanished; edit discarded");
                     return;
                 }
+                let name = state.name.trim().to_string();
+                if self
+                    .config
+                    .connections
+                    .iter()
+                    .enumerate()
+                    .any(|(other_idx, connection)| {
+                        other_idx != idx && connection.name.trim() == name
+                    })
+                {
+                    self.flash(format!("connection name {name:?} already exists"));
+                    self.modal = Modal::EditConnection { idx, state };
+                    return;
+                }
+                let port = match field_into_port(&state.port) {
+                    Ok(port) => port,
+                    Err(message) => {
+                        self.flash(message);
+                        self.modal = Modal::EditConnection { idx, state };
+                        return;
+                    }
+                };
                 let forwards: Vec<_> = state
                     .forwards
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(EditableForward::into_forward)
                     .collect();
-                self.config.connections[idx].name = state.name.trim().to_string();
+                self.config.connections[idx].name = name.clone();
+                self.config.connections[idx].description = field_into_option(&state.description);
                 self.config.connections[idx].host = Some(state.host.trim().to_string());
+                self.config.connections[idx].user = field_into_option(&state.user);
+                self.config.connections[idx].password = field_into_option(&state.password);
+                self.config.connections[idx].port = port;
                 self.config.connections[idx].forwards = forwards;
                 self.dirty = true;
-                self.flash(format!("updated {}", state.name.trim()));
+                self.flash(format!("updated {name}"));
             }
             CloseAction::Cancel(message) => {
                 self.flash(message);
@@ -961,7 +1126,11 @@ impl AutosshApp {
                         .connections
                         .push(autossh_core::ConnectionConfig {
                             name: cand.name.clone(),
+                            description: None,
                             host: Some(cand.host),
+                            user: None,
+                            password: None,
+                            port: None,
                             enabled: true,
                             ssh_path: None,
                             keepalive: cand.keepalive,
@@ -1017,14 +1186,20 @@ impl AutosshApp {
                     // SSH config has no forwards; seed a placeholder reverse
                     // tunnel so the config validates, then the user can edit.
                     let placeholder = autossh_core::ForwardConfig {
+                        enabled: true,
                         mode: autossh_core::ForwardMode::Remote,
                         forward: "10022:127.0.0.1:22".to_string(),
+                        description: None,
                     };
                     self.config
                         .connections
                         .push(autossh_core::ConnectionConfig {
                             name: cand.alias.clone(),
+                            description: None,
                             host: Some(cand.destination.clone()),
+                            user: None,
+                            password: None,
+                            port: None,
                             enabled: true,
                             ssh_path: None,
                             keepalive: self.keepalive(),

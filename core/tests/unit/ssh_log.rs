@@ -4,15 +4,21 @@ use crate::config::{ConnectionConfig, ForwardConfig, ForwardMode, KeepaliveConfi
 fn connection() -> ConnectionConfig {
     ConnectionConfig {
         name: "test".into(),
+        description: None,
         host: None,
+        user: None,
+        password: None,
+        port: None,
         enabled: true,
         ssh_path: None,
         keepalive: KeepaliveConfig::default(),
         retry: RetryConfig::default(),
         extra_args: Vec::new(),
         forwards: vec![ForwardConfig {
+            enabled: true,
             mode: ForwardMode::Local,
             forward: "8080:127.0.0.1:8080".into(),
+            description: None,
         }],
     }
 }
@@ -78,8 +84,10 @@ fn falls_back_to_configured_forwards_without_channel_context() {
 fn dynamic_forward_displays_bind_and_port_without_target() {
     let mut conn = connection();
     conn.forwards = vec![ForwardConfig {
+        enabled: true,
         mode: ForwardMode::Dynamic,
         forward: "0.0.0.0:1080".into(),
+        description: None,
     }];
     let mut annotator = SshStderrAnnotator::new(&conn);
     let line = annotator
@@ -99,8 +107,10 @@ fn dynamic_forward_displays_bind_and_port_without_target() {
 fn dynamic_forward_accepts_bare_port_spec() {
     let mut conn = connection();
     conn.forwards = vec![ForwardConfig {
+        enabled: true,
         mode: ForwardMode::Dynamic,
         forward: "1080".into(),
+        description: None,
     }];
     let mut annotator = SshStderrAnnotator::new(&conn);
     let line = annotator

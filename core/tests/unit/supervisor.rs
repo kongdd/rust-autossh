@@ -4,15 +4,21 @@ use crate::config::{ForwardConfig, ForwardMode, KeepaliveConfig, RetryConfig};
 fn connection() -> ConnectionConfig {
     ConnectionConfig {
         name: "test".into(),
+        description: None,
         host: None,
+        user: None,
+        password: None,
+        port: None,
         enabled: true,
         ssh_path: Some("ssh-command-that-does-not-exist".into()),
         keepalive: KeepaliveConfig::default(),
         retry: RetryConfig::default(),
         extra_args: Vec::new(),
         forwards: vec![ForwardConfig {
+            enabled: true,
             mode: ForwardMode::Local,
             forward: "8080:127.0.0.1:8080".into(),
+            description: None,
         }],
     }
 }
@@ -26,6 +32,11 @@ fn snapshot_detects_same_size_content_change() {
     fs::write(&path, b"other").unwrap();
     assert_ne!(first, config_snapshot(&path));
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn decodes_utf8_stderr_and_removes_line_endings() {
+    assert_eq!(decode_ssh_stderr("连接失败\r\n".as_bytes()), "连接失败");
 }
 
 #[test]

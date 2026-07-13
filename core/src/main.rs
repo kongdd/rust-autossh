@@ -26,29 +26,29 @@ struct Cli {
 enum CommandName {
     /// Run tunnel supervisors in the foreground. Ctrl+C stops all ssh processes.
     Run {
-        #[arg(short, long, default_value_os_t = default_config_path())]
+        #[arg(short, long, default_value_os_t = autossh_core::default_config_path())]
         config: PathBuf,
     },
     /// Validate configuration without starting any SSH process.
     Check {
-        #[arg(short, long, default_value_os_t = default_config_path())]
+        #[arg(short, long, default_value_os_t = autossh_core::default_config_path())]
         config: PathBuf,
     },
     /// Run as a Windows service. This is started by the Service Control Manager.
     Service {
-        #[arg(short, long, default_value_os_t = default_config_path())]
+        #[arg(short, long, default_value_os_t = autossh_core::default_config_path())]
         config: PathBuf,
     },
     /// Open the configuration file in the default editor (code / code.exe).
     Edit {
-        #[arg(short, long, default_value_os_t = default_config_path())]
+        #[arg(short, long, default_value_os_t = autossh_core::default_config_path())]
         config: PathBuf,
     },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command.unwrap_or(CommandName::Run {
-        config: default_config_path(),
+        config: autossh_core::default_config_path(),
     }) {
         CommandName::Run { config } => run_foreground(config),
         CommandName::Check { config } => check_config(config),
@@ -239,24 +239,3 @@ forwards = [
 ]
 keepalive = { interval = 60, count_max = 3 }
 "##;
-
-fn default_config_path() -> PathBuf {
-    // Linux/macOS follow the XDG Base Directory spec: $XDG_CONFIG_HOME or
-    // $HOME/.config. Windows has no XDG convention, so use %APPDATA% (Roaming),
-    // which every Windows SKU since Vista guarantees to exist for the current
-    // user. Falling back to USERPROFILE would create a stray `\.config`
-    // directory that Windows File Explorer cannot open.
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("autossh").join("config.toml");
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-        return PathBuf::from(home).join(".config").join("autossh").join("config.toml");
-    }
-    #[allow(unreachable_code)]
-    PathBuf::from(".").join("autossh").join("config.toml")
-}

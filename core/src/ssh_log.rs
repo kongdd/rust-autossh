@@ -6,6 +6,7 @@ pub(crate) fn describe_configured_forwards(connection: &ConnectionConfig) -> Str
     let forwards = connection
         .forwards
         .iter()
+        .filter(|forward| forward.enabled)
         .map(ForwardInfo::from_config)
         .collect::<Vec<_>>();
     describe_forward_list(&forwards)
@@ -25,6 +26,7 @@ impl SshStderrAnnotator {
             forwards: connection
                 .forwards
                 .iter()
+                .filter(|forward| forward.enabled)
                 .map(ForwardInfo::from_config)
                 .collect(),
             channels: HashMap::new(),
@@ -193,10 +195,11 @@ impl ForwardInfo {
     fn from_config(forward: &ForwardConfig) -> Self {
         let parsed = match forward.mode {
             ForwardMode::Dynamic => parse_dynamic_spec(&forward.forward),
-            ForwardMode::Local | ForwardMode::Remote => parse_forward_spec(&forward.forward)
-                .map(|(host, port, target_host, target_port)| {
+            ForwardMode::Local | ForwardMode::Remote => parse_forward_spec(&forward.forward).map(
+                |(host, port, target_host, target_port)| {
                     (host, port, Some(target_host), Some(target_port))
-                }),
+                },
+            ),
         };
         Self {
             mode: forward.mode,
@@ -358,7 +361,9 @@ fn parse_forward_spec(spec: &str) -> Option<(Option<String>, String, String, Str
 }
 
 /// `ssh -D [bind:]port` — no target; rendered like an `-L`/`-R` listen side.
-fn parse_dynamic_spec(spec: &str) -> Option<(Option<String>, String, Option<String>, Option<String>)> {
+fn parse_dynamic_spec(
+    spec: &str,
+) -> Option<(Option<String>, String, Option<String>, Option<String>)> {
     let parts = split_forward_spec(spec);
     match parts.as_slice() {
         [port] if !port.is_empty() => Some((None, port.clone(), None, None)),

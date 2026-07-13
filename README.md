@@ -30,7 +30,7 @@ Copy and edit [`config.example.toml`](config.example.toml), then validate it. Th
 .\rust-autossh.exe run --config %USERPROFILE%\.config\autossh\config.toml
 ```
 
-Each `[[connections]]` block creates one `ssh` process. `name` is its unique log identifier; optional `host` is the SSH destination (host/IP/alias) and defaults to `name` for backward compatibility. Its `forwards` array may mix any number of `-L`, `-R`, and `-D` (local SOCKS proxy) mappings.
+Each `[[connections]]` block creates one `ssh` process. `name` is a unique connection identifier; optional `description` is a GUI note. Optional `host` is the SSH destination (host/IP/alias) and defaults to `name` for backward compatibility. Optional `user`, `password`, and `port` map to SSH authentication and `-p`; omitting `port` uses OpenSSH's default (22). Its `forwards` array may mix any number of `-L`, `-R`, and `-D` (local SOCKS proxy) mappings. Set a forward's `enabled = false` to keep it in the configuration without passing it to SSH.
 
 For `-L` and `-R` the spec is `[bind:]listen_port:target_host:target_port`; the format is identical — what changes is *which side* listens and *which side* owns the target: `-L` listens on the client and targets the server; `-R` listens on the server and targets the client. For `-D` the spec is `[bind:]port` only — a local SOCKS proxy whose target is chosen by the SOCKS client per request.
 

@@ -3,10 +3,15 @@
 //! Each modal captures its own state and exposes a `CloseAction` that the
 //! caller (`AutosshApp`) interprets to apply or discard changes.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use autossh_core::{
     Config, ConnectionConfig, ForwardConfig, ForwardMode, KeepaliveConfig, RetryConfig,
+    test_connection,
 };
 use eframe::egui::{self, Color32, RichText};
 
@@ -24,28 +29,33 @@ trait Pickable {
 }
 
 /// Render a scrollable checklist with select-all, used by both import dialogs.
-fn pick_list<T: Pickable>(
-    ui: &mut egui::Ui, items: &mut [T],
-    render: impl Fn(&T, &mut egui::Ui),
-) {
+fn pick_list<T: Pickable>(ui: &mut egui::Ui, items: &mut [T], render: impl Fn(&T, &mut egui::Ui)) {
     let mut all = items.iter().filter(|c| !c.is_dup()).all(|c| c.picked());
     ui.horizontal(|ui| {
         if ui.checkbox(&mut all, "select all").changed() {
-            for c in items.iter_mut().filter(|c| !c.is_dup()) { c.set_picked(all); }
+            for c in items.iter_mut().filter(|c| !c.is_dup()) {
+                c.set_picked(all);
+            }
         }
     });
     egui::ScrollArea::vertical()
-        .max_height(220.0).auto_shrink([false, false])
+        .max_height(220.0)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             for c in items.iter_mut() {
                 let mut sel = c.picked();
                 ui.horizontal(|ui| {
                     ui.add_enabled(!c.is_dup(), egui::Checkbox::new(&mut sel, ""));
-                    if sel != c.picked() { c.set_picked(sel); }
+                    if sel != c.picked() {
+                        c.set_picked(sel);
+                    }
                     render(c, ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if c.is_dup() { ui.colored_label(FG_WARNING, "(duplicate)"); }
-                        else if c.picked() { ui.colored_label(FG_PRIMARY, "✓"); }
+                        if c.is_dup() {
+                            ui.colored_label(FG_WARNING, "(duplicate)");
+                        } else if c.picked() {
+                            ui.colored_label(FG_PRIMARY, "✓");
+                        }
                     });
                 });
             }
@@ -53,15 +63,27 @@ fn pick_list<T: Pickable>(
 }
 
 impl Pickable for CandidateConnection {
-    fn picked(&self) -> bool { self.selected }
-    fn set_picked(&mut self, v: bool) { self.selected = v; }
-    fn is_dup(&self) -> bool { self.duplicate }
+    fn picked(&self) -> bool {
+        self.selected
+    }
+    fn set_picked(&mut self, v: bool) {
+        self.selected = v;
+    }
+    fn is_dup(&self) -> bool {
+        self.duplicate
+    }
 }
 
 impl Pickable for SshHostEntry {
-    fn picked(&self) -> bool { self.selected }
-    fn set_picked(&mut self, v: bool) { self.selected = v; }
-    fn is_dup(&self) -> bool { self.duplicate }
+    fn picked(&self) -> bool {
+        self.selected
+    }
+    fn set_picked(&mut self, v: bool) {
+        self.selected = v;
+    }
+    fn is_dup(&self) -> bool {
+        self.duplicate
+    }
 }
 
 // ─── enums ─────────────────────────────────────────────────────────────────────
@@ -124,45 +146,91 @@ pub enum Modal {
 
 // ─── dialog state types ────────────────────────────────────────────────────────
 
+/// Asynchronous state of the “test connection” probe shown in the add/edit dialog.
+#[derive(Clone, Default)]
+pub enum TestStatus {
+    #[default]
+    Idle,
+    Running,
+    Done {
+        ok: bool,
+        message: String,
+    },
+}
+
 pub struct AddDialogState {
     pub name: String,
+    pub description: String,
     pub host: String,
+    /// Optional SSH user. When set, the effective destination becomes
+    /// `user@host` (unless `host` itself already looks like `user@host`).
+    pub user: String,
+    /// Optional password for non-interactive password auth via `sshpass -e`.
+    /// Empty when only key/agent auth is desired (the default).
+    pub password: String,
+    /// Optional SSH server port; empty delegates to OpenSSH's default (22).
+    pub port: String,
     /// Each entry is editable in-place inside the dialog (mode dropdown, free
     /// text, delete). Converted to `Vec<ForwardConfig>` only on commit.
     pub forwards: Vec<EditableForward>,
     pub checked: Vec<bool>,
     pub draft_mode: ForwardMode,
     pub draft_forward: String,
+    pub draft_enabled: bool,
+    pub draft_checked: bool,
+    /// Optional note captured for the next forward the user is about to add;
+    /// moved into the freshly-pushed `EditableForward` on commit.
+    pub draft_desc: String,
     pub close: CloseAction,
+    /// Live state of the “test connection” probe.
+    pub test_status: TestStatus,
+    /// Channel written by the background ssh probe and polled each frame.
+    /// `Some((ok, msg))` indicates the result is ready to be drained.
+    pub test_channel: Arc<Mutex<Option<(bool, String)>>>,
 }
 
 impl Default for AddDialogState {
     fn default() -> Self {
         Self {
             name: String::new(),
+            description: String::new(),
             host: String::new(),
+            user: String::new(),
+            password: String::new(),
+            port: String::new(),
             forwards: Vec::new(),
             checked: Vec::new(),
             // New connections default to remote forwards (the canonical autossh
             // pattern of opening an inbound tunnel to a client).
             draft_mode: ForwardMode::Remote,
             draft_forward: String::new(),
+            draft_enabled: true,
+            draft_checked: false,
+            draft_desc: String::new(),
             close: CloseAction::None,
+            test_status: TestStatus::default(),
+            test_channel: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct EditableForward {
+    pub enabled: bool,
     pub mode: ForwardMode,
     pub forward: String,
+    /// Free-form note displayed alongside the forward in the GUI; empty
+    /// string falls back to `None` on commit so the TOML stays clean.
+    pub description: String,
 }
 
 impl EditableForward {
     pub fn into_forward(self) -> ForwardConfig {
         ForwardConfig {
+            enabled: self.enabled,
             mode: self.mode,
             forward: self.forward,
+            description: field_into_option(&self.description),
         }
     }
 }
@@ -215,6 +283,89 @@ pub struct CandidateConnection {
     pub duplicate: bool,
 }
 
+/// Map an editable dialog field to its `Option<String>` storage form: an empty
+/// input writes `None` (fallback to default behaviour), a non-empty value is
+/// trimmed and wrapped.
+fn field_into_option(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parse an optional SSH port, rejecting zero and non-numeric values.
+pub(crate) fn field_into_port(value: &str) -> Result<Option<u16>, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.parse::<u16>() {
+        Ok(port @ 1..=u16::MAX) => Ok(Some(port)),
+        _ => Err("port must be an integer from 1 to 65535"),
+    }
+}
+
+// ─── test connection helpers ─────────────────────────────────────────────────────
+
+/// Drain the background ssh probe channel; once a result arrives, flip
+/// `test_status` from `Running` to `Done`. While still running, request a
+/// repaint so the dialog keeps polling without user interaction.
+fn poll_test(state: &mut AddDialogState, ctx: &egui::Context) {
+    if !matches!(state.test_status, TestStatus::Running) {
+        return;
+    }
+    let result = state
+        .test_channel
+        .try_lock()
+        .ok()
+        .and_then(|mut g| g.take());
+    if let Some((ok, message)) = result {
+        state.test_status = TestStatus::Done { ok, message };
+    } else {
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+}
+
+/// Build a throwaway `ConnectionConfig` for the probe so the dialog can test
+/// before the row has been committed. Forwards are irrelevant for an auth-only
+/// probe, so they are left empty.
+fn connection_for_test(state: &AddDialogState) -> ConnectionConfig {
+    ConnectionConfig {
+        name: state.name.trim().to_string(),
+        description: field_into_option(&state.description),
+        host: Some(state.host.trim().to_string()),
+        user: field_into_option(&state.user),
+        password: field_into_option(&state.password),
+        port: field_into_port(&state.port).unwrap_or(None),
+        enabled: true,
+        ssh_path: None,
+        keepalive: KeepaliveConfig::default(),
+        retry: RetryConfig::default(),
+        extra_args: Vec::new(),
+        forwards: Vec::new(),
+    }
+}
+
+/// Spawn a background thread that runs `ssh … true` and reports the outcome
+/// through `test_channel`. The probe is capped at 20 s — well above the default
+/// 15 s `ConnectTimeout` yet short enough not to stall the dialog.
+fn spawn_test(state: &mut AddDialogState) {
+    let connection = connection_for_test(state);
+    state.test_status = TestStatus::Running;
+    state.test_channel = Arc::new(Mutex::new(None));
+    let channel = Arc::clone(&state.test_channel);
+    let _ = std::thread::Builder::new()
+        .name("ssh-test".into())
+        .spawn(move || {
+            let output = test_connection(&connection, Duration::from_secs(20));
+            if let Ok(mut guard) = channel.lock() {
+                *guard = Some((output.ok, output.message));
+            }
+        });
+}
+
 // ─── helpers ───────────────────────────────────────────────────────────────────
 
 /// Compact label used in the per-row mode dropdown (existing forwards + draft).
@@ -229,9 +380,11 @@ fn forward_mode_label(mode: ForwardMode) -> &'static str {
 /// Mode-aware placeholder: hint states which side listens vs targets.
 fn forward_hint(mode: ForwardMode) -> &'static str {
     match mode {
-        ForwardMode::Local => "0.0.0.0:8080:127.0.0.1:80  (listen on client → target on server)",
-        ForwardMode::Remote => "10022:127.0.0.1:22  (listen on server → target on client)",
-        ForwardMode::Dynamic => "1080  (or  0.0.0.0:1080 for an open SOCKS proxy)",
+        // Hints are intentionally short so they fit inside the ~225 px column
+        // reserved for the spec input alongside the per-forward description.
+        ForwardMode::Local => "0.0.0.0:8080:127.0.0.1:80  (L client→target)",
+        ForwardMode::Remote => "10022:127.0.0.1:22  (R server→target)",
+        ForwardMode::Dynamic => "1080  (D SOCKS)",
     }
 }
 
@@ -240,53 +393,260 @@ pub fn state_from_connection(c: &ConnectionConfig) -> AddDialogState {
     let n = c.forwards.len();
     AddDialogState {
         name: c.name.clone(),
+        description: c.description.clone().unwrap_or_default(),
         host: c.host.clone().unwrap_or_else(|| c.name.clone()),
+        user: c.user.clone().unwrap_or_default(),
+        password: c.password.clone().unwrap_or_default(),
+        port: c.port.map(|port| port.to_string()).unwrap_or_default(),
         forwards: c
             .forwards
             .iter()
             .map(|f| EditableForward {
+                enabled: f.enabled,
                 mode: f.mode,
                 forward: f.forward.clone(),
+                description: f.description.clone().unwrap_or_default(),
             })
             .collect(),
         checked: vec![false; n],
         // Carry the same default forward type as the add dialog for new lines.
         draft_mode: ForwardMode::Remote,
         draft_forward: String::new(),
+        draft_enabled: true,
+        draft_checked: false,
+        draft_desc: String::new(),
         close: CloseAction::None,
+        test_status: TestStatus::default(),
+        test_channel: Arc::new(Mutex::new(None)),
     }
 }
 
 // ─── dialog UI: add / edit connection ─────────────────────────────────────────
 
-pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
+fn enabled_dot(ui: &mut egui::Ui, enabled: &mut bool) {
+    let color = if *enabled { FG_SUCCESS } else { FG_MUTED };
+    let status = if *enabled { "enabled" } else { "disabled" };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::click());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+    if response
+        .on_hover_text(format!("{status}; click to toggle"))
+        .clicked()
+    {
+        *enabled = !*enabled;
+    }
+}
+
+fn push_draft_forward(state: &mut AddDialogState) {
+    let forward = state.draft_forward.trim().to_string();
+    if forward.is_empty() {
+        return;
+    }
+    state.forwards.push(EditableForward {
+        enabled: state.draft_enabled,
+        mode: state.draft_mode,
+        forward,
+        description: std::mem::take(&mut state.draft_desc),
+    });
+    state.checked.push(state.draft_checked);
+    state.draft_forward.clear();
+    state.draft_enabled = true;
+    state.draft_checked = false;
+}
+
+pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState, name_taken: bool) {
     // Esc closes the dialog whether the user has filled fields or not.
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.close = CloseAction::Cancel("cancelled");
     }
 
-    // ── host identity ─────────────────────────────────────────────────────
+    // Drain the background ssh probe if it has produced a result.
+    poll_test(state, ui.ctx());
+
+    // ── host identity ─────────────────────────────────────────
+    // Row 1 is (Name, Description); row 2 is (Host, User, Password, Port).
+    // Each cell is allocated with an exact `vec2(width, height)` via
+    // `allocate_ui`, and the inner TextEdit asks for the same width via
+    // `desired_width`, so the outer box and the inner field line up pixel
+    // for pixel. `allocate_ui` consumes ~8 px of internal padding on each
+    // side, so the visible inter-field gap is `COL_GAP + 8`. The two rows
+    // are computed to share identical geometry so Description's left edge
+    // sits flush with User's and its right edge sits flush with Port's.
+    const NAME_HOST_WIDTH: f32 = 180.0;
+    const USER_WIDTH: f32 = 120.0;
+    const PASSWORD_WIDTH: f32 = 170.0;
+    const PORT_WIDTH: f32 = 70.0;
+    const COL_GAP: f32 = 8.0;
+    const FIELD_PADDING: f32 = 8.0; // egui's allocate_ui internal padding
+    const GAP_TOTAL: f32 = COL_GAP + FIELD_PADDING;
+    // Description start = NAME_HOST_WIDTH + GAP_TOTAL (== User's left edge).
+    // Description end must equal Port's right edge:
+    //   NAME_HOST_WIDTH + GAP_TOTAL + DESCRIPTION_WIDTH
+    //   = NAME_HOST_WIDTH + GAP_TOTAL + USER_WIDTH + GAP_TOTAL + PASSWORD_WIDTH + GAP_TOTAL + PORT_WIDTH
+    // so DESCRIPTION_WIDTH = USER + PASSWORD + PORT + 2*GAP_TOTAL.
+    const DESCRIPTION_WIDTH: f32 = USER_WIDTH + GAP_TOTAL + PASSWORD_WIDTH + GAP_TOTAL + PORT_WIDTH;
+    const FIELD_HEIGHT: f32 = 40.0;
+
+    // Forwards-row column widths (pixels). Each row is four columns:
+    //  N.☐  |  mode combo  |  forward spec  |  description
+    // Three inter-column gaps (COL_GAP = 8 px each) separate them.
+    // The total row width equals FORWARDS_AREA_WIDTH so the description's
+    // right edge aligns with the connection row's Port field right edge.
+    const FORWARDS_AREA_WIDTH: f32 = NAME_HOST_WIDTH
+        + GAP_TOTAL
+        + USER_WIDTH
+        + GAP_TOTAL
+        + PASSWORD_WIDTH
+        + GAP_TOTAL
+        + PORT_WIDTH;
+    const FORWARD_NUM_W: f32 = 72.0;
+    const FORWARD_MODE_W: f32 = 110.0;
+    const FORWARD_SPEC_W: f32 = 150.0;
+    // `allocate_ui` shrinks the compact number/status and mode cells to their
+    // contents. Compensate that reclaimed width so the last input and group
+    // border end at the same x-coordinate as the Port field above.
+    const FORWARD_END_COMPENSATION: f32 = 32.0;
+    const FORWARD_DESC_W: f32 = FORWARDS_AREA_WIDTH
+        - FORWARD_NUM_W
+        - GAP_TOTAL
+        - FORWARD_MODE_W
+        - GAP_TOTAL
+        - FORWARD_SPEC_W
+        - GAP_TOTAL
+        + FORWARD_END_COMPENSATION;
+    const FORWARD_ROW_H: f32 = 28.0;
+
     ui.add_space(2.0);
-    ui.label(RichText::new("Name").strong().color(FG_PRIMARY));
-    ui.add(
-        egui::TextEdit::singleline(&mut state.name)
-            .hint_text("home-server")
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new("Host (SSH alias or user@host)")
-            .strong()
-            .color(FG_PRIMARY),
-    );
-    ui.add(
-        egui::TextEdit::singleline(&mut state.host)
-            .hint_text("user@example.com")
-            .desired_width(f32::INFINITY),
-    );
+    ui.horizontal(|ui| {
+        ui.allocate_ui(egui::vec2(NAME_HOST_WIDTH, FIELD_HEIGHT), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Name").strong().color(FG_PRIMARY));
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.name)
+                        .hint_text("home-server")
+                        .desired_width(NAME_HOST_WIDTH),
+                );
+            });
+        });
+        ui.add_space(COL_GAP);
+        ui.allocate_ui(egui::vec2(DESCRIPTION_WIDTH, FIELD_HEIGHT), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Description").strong().color(FG_PRIMARY));
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.description)
+                        .hint_text("optional note")
+                        .desired_width(DESCRIPTION_WIDTH),
+                );
+            });
+        });
+    });
+    if name_taken && !state.name.trim().is_empty() {
+        ui.label(
+            RichText::new("Name already exists; choose a unique name.")
+                .small()
+                .color(FG_ERROR),
+        );
+    }
+    ui.add_space(3.0);
+    ui.horizontal(|ui| {
+        ui.allocate_ui(egui::vec2(NAME_HOST_WIDTH, FIELD_HEIGHT), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Host").strong().color(FG_PRIMARY))
+                    .on_hover_text("SSH alias or user@host");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.host)
+                        .hint_text("example.com")
+                        .desired_width(NAME_HOST_WIDTH),
+                );
+            });
+        });
+        ui.add_space(COL_GAP);
+        ui.allocate_ui(egui::vec2(USER_WIDTH, FIELD_HEIGHT), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("User").strong().color(FG_PRIMARY))
+                    .on_hover_text("Optional; overrides the user in Host");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.user)
+                        .hint_text("optional")
+                        .desired_width(USER_WIDTH),
+                );
+            });
+        });
+        ui.add_space(COL_GAP);
+        ui.allocate_ui(egui::vec2(PASSWORD_WIDTH, FIELD_HEIGHT), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Password").strong().color(FG_PRIMARY))
+                    .on_hover_text("Optional; stored as plaintext and requires sshpass on PATH");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.password)
+                        .password(true)
+                        .hint_text("optional")
+                        .desired_width(PASSWORD_WIDTH),
+                );
+            });
+        });
+        ui.add_space(COL_GAP);
+        ui.allocate_ui(egui::vec2(PORT_WIDTH, FIELD_HEIGHT), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Port").strong().color(FG_PRIMARY))
+                    .on_hover_text("Optional SSH server port; defaults to 22");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.port)
+                        .hint_text("22")
+                        .desired_width(PORT_WIDTH),
+                );
+            });
+        });
+    });
+    if field_into_port(&state.port).is_err() {
+        ui.label(
+            RichText::new("Port must be an integer from 1 to 65535.")
+                .small()
+                .color(FG_ERROR),
+        );
+    }
+
+    // ── test connection ───────────────────────────────────────────────────
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let can_test = !state.host.trim().is_empty();
+        let running = matches!(state.test_status, TestStatus::Running);
+        let pressed = if running {
+            ui.add_enabled(false, egui::Button::new("🔌  testing…"))
+                .clicked()
+        } else {
+            ui.add_enabled(can_test, egui::Button::new("🔌  test connection"))
+                .clicked()
+        };
+        if pressed {
+            spawn_test(state);
+        }
+        match &state.test_status {
+            TestStatus::Idle => {}
+            TestStatus::Running => {
+                ui.label(RichText::new("testing…").small().color(FG_WARNING));
+            }
+            TestStatus::Done { ok, message } => {
+                let (icon, color) = if *ok {
+                    ("✓", FG_SUCCESS)
+                } else {
+                    ("✗", FG_ERROR)
+                };
+                ui.label(
+                    RichText::new(format!("{icon} {message}"))
+                        .small()
+                        .color(color),
+                );
+            }
+        }
+        ui.label(
+            RichText::new("tests the configured authentication method")
+                .small()
+                .color(FG_DIM),
+        );
+    });
 
     // ── forwarded ports ───────────────────────────────────────────────────
-    ui.add_space(8.0);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Forwarded ports").strong().color(FG_PRIMARY));
         ui.label(
@@ -296,113 +656,182 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
         );
     });
     ui.group(|ui| {
-        // existing forwards: each is its own editable row.
         if state.forwards.is_empty() {
             ui.label(
-                RichText::new("no ports yet — fill the row at the bottom and press ＋ add")
-                    .small()
-                    .color(FG_DIM),
+                RichText::new(
+                    "no ports yet — fill the row below; it will be included when you press Apply",
+                )
+                .small()
+                .color(FG_DIM),
             );
         }
         state.checked.resize(state.forwards.len(), false);
-        for (i, fr) in state.forwards.iter_mut().enumerate() {
+
+        // ── existing forwards ───────────────────────────────────
+        for i in 0..state.forwards.len() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{}.", i + 1)).color(FG_MUTED));
-                let mut checked = *state.checked.get(i).unwrap_or(&false);
-                if ui.checkbox(&mut checked, "").changed() && i < state.checked.len() {
-                    state.checked[i] = checked;
-                }
-                egui::ComboBox::from_id_salt(("add_mode", i))
-                    .selected_text(forward_mode_label(fr.mode))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut fr.mode, ForwardMode::Local, forward_mode_label(ForwardMode::Local));
-                        ui.selectable_value(&mut fr.mode, ForwardMode::Remote, forward_mode_label(ForwardMode::Remote));
-                        ui.selectable_value(&mut fr.mode, ForwardMode::Dynamic, forward_mode_label(ForwardMode::Dynamic));
+                // col 1: N. + delete checkbox + enabled status
+                ui.allocate_ui(egui::vec2(FORWARD_NUM_W, FORWARD_ROW_H), |ui| {
+                    let label = format!("{}.", i + 1);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        ui.label(RichText::new(label).small().color(FG_MUTED));
+                        let mut checked = *state.checked.get(i).unwrap_or(&false);
+                        if ui.checkbox(&mut checked, "").changed() {
+                            if let Some(slot) = state.checked.get_mut(i) {
+                                *slot = checked;
+                            }
+                        }
+                        enabled_dot(ui, &mut state.forwards[i].enabled);
                     });
-                ui.add(
-                    egui::TextEdit::singleline(&mut fr.forward)
-                        .hint_text(forward_hint(fr.mode))
-                        .desired_width(f32::INFINITY),
-                );
+                });
+                ui.add_space(COL_GAP);
+                // col 2: mode combo
+                ui.allocate_ui(egui::vec2(FORWARD_MODE_W, FORWARD_ROW_H), |ui| {
+                    egui::ComboBox::from_id_salt(("add_mode", i))
+                        .selected_text(forward_mode_label(state.forwards[i].mode))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.forwards[i].mode,
+                                ForwardMode::Local,
+                                forward_mode_label(ForwardMode::Local),
+                            );
+                            ui.selectable_value(
+                                &mut state.forwards[i].mode,
+                                ForwardMode::Remote,
+                                forward_mode_label(ForwardMode::Remote),
+                            );
+                            ui.selectable_value(
+                                &mut state.forwards[i].mode,
+                                ForwardMode::Dynamic,
+                                forward_mode_label(ForwardMode::Dynamic),
+                            );
+                        });
+                });
+                ui.add_space(COL_GAP);
+                // col 3: forward spec
+                let spec_hint = forward_hint(state.forwards[i].mode);
+                ui.allocate_ui(egui::vec2(FORWARD_SPEC_W, FORWARD_ROW_H), |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.forwards[i].forward)
+                            .hint_text(spec_hint),
+                    );
+                });
+                ui.add_space(COL_GAP);
+                // col 4: description
+                ui.allocate_ui(egui::vec2(FORWARD_DESC_W, FORWARD_ROW_H), |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.forwards[i].description)
+                            .hint_text("optional note"),
+                    );
+                });
             });
         }
+
+        // ── delete checked ───────────────────────────────────────
         let n_checked = state.checked.iter().filter(|&&c| c).count();
         if n_checked > 0 {
-            ui.horizontal(|ui| {
-                if ui
-                    .button(
-                        RichText::new(format!("\u{1f5d1}  delete checked ({n_checked})"))
-                            .color(FG_ERROR),
-                    )
-                    .clicked()
-                {
-                    let mut i = state.forwards.len();
-                    while i > 0 {
-                        i -= 1;
-                        if i < state.checked.len() && state.checked[i] {
-                            state.forwards.remove(i);
-                            state.checked.remove(i);
-                        }
+            if ui
+                .button(RichText::new(format!("🗑  delete checked ({n_checked})")).color(FG_ERROR))
+                .clicked()
+            {
+                let mut i = state.forwards.len();
+                while i > 0 {
+                    i -= 1;
+                    if i < state.checked.len() && state.checked[i] {
+                        state.forwards.remove(i);
+                        state.checked.remove(i);
                     }
                 }
-            });
+            }
         }
 
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        // row for adding a new port (always visible so users can keep extending)
+        // ── draft row (same columns and spacing as existing rows) ──
+        let mut submit_draft = false;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("draft_mode")
-                .selected_text(forward_mode_label(state.draft_mode))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Local, forward_mode_label(ForwardMode::Local));
-                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Remote, forward_mode_label(ForwardMode::Remote));
-                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Dynamic, forward_mode_label(ForwardMode::Dynamic));
+            // col 1: N+1 + delete checkbox + enabled status
+            ui.allocate_ui(egui::vec2(FORWARD_NUM_W, FORWARD_ROW_H), |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.label(
+                        RichText::new(format!("{}.", state.forwards.len() + 1))
+                            .small()
+                            .color(FG_MUTED),
+                    );
+                    ui.checkbox(&mut state.draft_checked, "");
+                    enabled_dot(ui, &mut state.draft_enabled);
                 });
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut state.draft_forward)
-                    .hint_text(forward_hint(state.draft_mode))
-                    .desired_width(f32::INFINITY),
-            );
-            // egui 0.29 singleline TextEdit surrenders focus on Enter but
-            // also consumes the key event — lost_focus() alone is reliable.
-            let submitted = resp.lost_focus();
-            if ui.button("+ add").clicked() || submitted {
-                let trimmed = state.draft_forward.trim().to_string();
-                if !trimmed.is_empty() {
-                    state.forwards.push(EditableForward {
-                        mode: state.draft_mode,
-                        forward: trimmed,
+            });
+            ui.add_space(COL_GAP);
+            // col 2: mode combo
+            ui.allocate_ui(egui::vec2(FORWARD_MODE_W, FORWARD_ROW_H), |ui| {
+                egui::ComboBox::from_id_salt("draft_mode")
+                    .selected_text(forward_mode_label(state.draft_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.draft_mode,
+                            ForwardMode::Local,
+                            forward_mode_label(ForwardMode::Local),
+                        );
+                        ui.selectable_value(
+                            &mut state.draft_mode,
+                            ForwardMode::Remote,
+                            forward_mode_label(ForwardMode::Remote),
+                        );
+                        ui.selectable_value(
+                            &mut state.draft_mode,
+                            ForwardMode::Dynamic,
+                            forward_mode_label(ForwardMode::Dynamic),
+                        );
                     });
-                    state.draft_forward.clear();
-                }
-            }
+            });
+            ui.add_space(COL_GAP);
+            // col 3: forward spec
+            ui.allocate_ui(egui::vec2(FORWARD_SPEC_W, FORWARD_ROW_H), |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.draft_forward)
+                        .hint_text(forward_hint(state.draft_mode)),
+                );
+                submit_draft |= (response.has_focus() || response.lost_focus())
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            });
+            ui.add_space(COL_GAP);
+            // col 4: description; full width keeps the draft row aligned
+            // with every configured-forward row above it.
+            ui.allocate_ui(egui::vec2(FORWARD_DESC_W, FORWARD_ROW_H), |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.draft_desc).hint_text("optional note"),
+                );
+                submit_draft |= (response.has_focus() || response.lost_focus())
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            });
         });
+        if submit_draft {
+            push_draft_forward(state);
+        }
     });
 
     // ── footer ─────────────────────────────────────────────────────────────
-    ui.add_space(8.0);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
-        let can_commit = !state.name.trim().is_empty()
+        let can_commit = !name_taken
+            && !state.name.trim().is_empty()
             && !state.host.trim().is_empty()
-            && !state.forwards.is_empty();
+            && field_into_port(&state.port).is_ok()
+            && (!state.forwards.is_empty() || !state.draft_forward.trim().is_empty());
         if ui
             .add_enabled(
                 can_commit,
-                egui::Button::new(RichText::new("✔  Add connection").strong()),
+                egui::Button::new(RichText::new("✔  Apply").strong()),
             )
             .clicked()
         {
+            push_draft_forward(state);
             state.close = CloseAction::Commit;
         }
         if ui.button("cancel").clicked() {
             state.close = CloseAction::Cancel("cancelled");
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new("Esc to close").small().color(FG_DIM));
-        });
     });
 }
 
@@ -511,7 +940,8 @@ pub fn run_import_dialog_ui(ui: &mut egui::Ui, state: &mut ImportDialogState, ex
                 ui.label(RichText::new(&c.name).strong());
                 ui.label(
                     RichText::new(format!("{}  ·  {} forwards", c.host, c.forwards.len()))
-                        .small().color(FG_MUTED),
+                        .small()
+                        .color(FG_MUTED),
                 );
             });
         });
@@ -612,7 +1042,8 @@ pub fn run_ssh_import_dialog_ui(
                 ui.label(RichText::new(&c.alias).strong());
                 ui.label(
                     RichText::new(format!("{}  ·  port {}", c.destination, c.port))
-                        .small().color(FG_MUTED),
+                        .small()
+                        .color(FG_MUTED),
                 );
             });
         });
@@ -724,15 +1155,21 @@ mod tests {
     fn make_connection(name: &str, host: &str, forward: &str) -> ConnectionConfig {
         ConnectionConfig {
             name: name.into(),
+            description: None,
             host: Some(host.into()),
+            user: None,
+            password: None,
+            port: None,
             enabled: true,
             ssh_path: None,
             keepalive: KeepaliveConfig::default(),
             retry: RetryConfig::default(),
             extra_args: Vec::new(),
             forwards: vec![ForwardConfig {
+                enabled: true,
                 mode: ForwardMode::Local,
                 forward: forward.into(),
+                description: None,
             }],
         }
     }
@@ -796,16 +1233,94 @@ mod tests {
     }
 
     #[test]
+    fn parses_optional_ssh_port() {
+        assert_eq!(field_into_port(""), Ok(None));
+        assert_eq!(field_into_port("2202"), Ok(Some(2202)));
+        assert!(field_into_port("0").is_err());
+        assert!(field_into_port("not-a-port").is_err());
+    }
+
+    #[test]
     fn state_from_connection_round_trips_fields() {
-        let conn = make_connection("home", "c005", "10022:127.0.0.1:22");
+        let mut conn = make_connection("home", "c005", "10022:127.0.0.1:22");
+        conn.description = Some("home gateway".into());
+        conn.port = Some(2202);
+        conn.forwards[0].description = Some("home SSH".into());
         let state = state_from_connection(&conn);
         assert_eq!(state.name, "home");
+        assert_eq!(state.description, "home gateway");
         assert_eq!(state.host, "c005");
+        assert_eq!(state.port, "2202");
         assert_eq!(state.forwards.len(), 1);
         assert_eq!(state.forwards[0].forward, "10022:127.0.0.1:22");
         assert_eq!(state.forwards[0].mode, ForwardMode::Local);
+        assert_eq!(
+            state.forwards[0].description, "home SSH",
+            "per-forward description must populate the editable row"
+        );
         // fresh edit starts with no draft so the user is not surprised
         assert!(state.draft_forward.is_empty());
+        assert!(state.draft_desc.is_empty());
+    }
+
+    #[test]
+    fn editable_forward_into_forward_drops_empty_description() {
+        // White-space-only and empty strings must round-trip to `None` so the
+        // persisted TOML does not sprout a noisy `description = ""` line.
+        let editable = EditableForward {
+            enabled: false,
+            mode: ForwardMode::Remote,
+            forward: "10022:127.0.0.1:22".into(),
+            description: "   ".into(),
+        };
+        let forward = editable.clone().into_forward();
+        assert!(!forward.enabled);
+        assert!(forward.description.is_none());
+        let with_text = EditableForward {
+            description: "home SSH".into(),
+            ..editable
+        };
+        let forward = with_text.into_forward();
+        assert_eq!(forward.description.as_deref(), Some("home SSH"));
+    }
+
+    #[test]
+    fn push_draft_forward_preserves_status_and_prepares_next_row() {
+        let mut state = AddDialogState {
+            draft_forward: " 1080 ".into(),
+            draft_desc: "SOCKS".into(),
+            draft_enabled: false,
+            draft_checked: true,
+            ..Default::default()
+        };
+        push_draft_forward(&mut state);
+        assert_eq!(state.forwards.len(), 1);
+        assert_eq!(state.forwards[0].forward, "1080");
+        assert_eq!(state.forwards[0].description, "SOCKS");
+        assert!(!state.forwards[0].enabled);
+        assert_eq!(state.checked, vec![true]);
+        assert!(state.draft_forward.is_empty());
+        assert!(state.draft_desc.is_empty());
+        assert!(state.draft_enabled);
+        assert!(!state.draft_checked);
+    }
+
+    #[test]
+    fn add_dialog_state_defaults_to_idle_test_status() {
+        let state = AddDialogState::default();
+        assert!(matches!(state.test_status, TestStatus::Idle));
+        assert!(
+            state.test_channel.lock().unwrap().is_none(),
+            "default channel must be empty"
+        );
+    }
+
+    #[test]
+    fn state_from_connection_round_trips_test_status() {
+        let conn = make_connection("home", "c005", "10022:127.0.0.1:22");
+        let state = state_from_connection(&conn);
+        assert!(matches!(state.test_status, TestStatus::Idle));
+        assert!(state.test_channel.lock().unwrap().is_none());
     }
 
     #[test]
@@ -814,7 +1329,11 @@ mod tests {
         // to the connection name keeps the dialog usable.
         let conn = ConnectionConfig {
             name: "home".into(),
+            description: None,
             host: None,
+            user: None,
+            password: None,
+            port: None,
             enabled: true,
             ssh_path: None,
             keepalive: KeepaliveConfig::default(),

@@ -2,12 +2,21 @@
 # Use --config to specify a different path.
 # Each [[connections]] block starts one ssh process with any number of -L / -R / -D forwards.
 # Authentication uses ordinary ~/.ssh/config (keys, agent, Host aliases).
+#
+# Optional password fallback: when `password` is set, `BatchMode=yes` is dropped
+# and `sshpass -e` feeds the password non-interactively. Requires `sshpass` on PATH.
+# `user` (optional) prepends `user@` to `host` unless `host` already contains `@`.
 
 [[connections]]
-name = "home-server"
+name = "home-server"              # unique connection identifier
+# description = "home lab gateway" # optional GUI note
 host = "amd"
+# user = "alice"                  # optional; overrides user in user@host
+# password = "s3cret"             # optional; enables password auth via sshpass
+# port = 2222                       # optional; SSH defaults to 22
 forwards = [
   # L/R: [bind:]port:host:port — listen side and target side swap per mode.
+  # Add enabled = false to retain a mapping without starting it.
   { mode = "local",   forward = "0.0.0.0:8080:127.0.0.1:8080" },  # client → server
   { mode = "remote",  forward = "1081:192.168.31.1:7890" },        # server → client
   # D: [bind:]port — local SOCKS, no target (SOCKS client picks it).
@@ -26,6 +35,8 @@ keepalive = { interval = 360, count_max = 10, connect_timeout = 15 }
 # [[connections]]
 # name = "backup-server"
 # host = "c006"
+# user = "backup"
+# password = "hunter2"            # key auth fails → fall back to password
 # forwards = [
 #   { mode = "remote", forward = "10022:127.0.0.1:22" },
 # ]

@@ -22,10 +22,26 @@ pub struct Config {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionConfig {
-    /// Unique log identifier.
+    /// Unique connection identifier.
     pub name: String,
+    /// Optional human-readable note displayed by the GUI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// SSH destination (`user@host` or Host alias). Defaults to `name` for compatibility.
     pub host: Option<String>,
+    /// Optional SSH user. When set and `host` does not already contain `@`,
+    /// the effective destination becomes `user@host`. Empty/`None` leaves
+    /// `host`/`name` unchanged so existing `user@host` configs keep working.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Optional password for non-interactive password auth via `sshpass -e`.
+    /// When set, `BatchMode=yes` is dropped so ssh attempts password auth as
+    /// a fallback to publickey. Stored in plaintext — protect the config file.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Optional SSH server port. Omitting this uses OpenSSH's default (22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     /// An optional explicit path to ssh (ssh.exe on Windows).
@@ -42,11 +58,20 @@ pub struct ConnectionConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardConfig {
+    /// Whether this forward is passed to ssh. Missing values default to enabled
+    /// so existing configuration files preserve their behaviour.
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
+    pub enabled: bool,
     /// `remote` → `ssh -R`; `local` → `ssh -L`; `dynamic` → `ssh -D` (SOCKS proxy).
     pub mode: ForwardMode,
     /// For `local` / `remote`: `[bind:]host:port:target_host:target_port` (e.g. `10022:127.0.0.1:22`).
     /// For `dynamic`: `[bind:]port` (e.g. `1080` or `0.0.0.0:1080`).
     pub forward: String,
+    /// Optional human-readable note displayed by the GUI (e.g. "home SSH",
+    /// "SOCKS proxy for Chrome"). Empty values fall back to `None` so the
+    /// TOML stays free of `description = ""` clutter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +113,10 @@ pub struct LogConfig {
 
 fn enabled_by_default() -> bool {
     true
+}
+
+fn is_enabled(enabled: &bool) -> bool {
+    *enabled
 }
 fn default_keepalive_interval() -> u64 {
     30
@@ -185,8 +214,25 @@ impl Default for RetryConfig {
 }
 
 impl ConnectionConfig {
-    pub fn destination(&self) -> &str {
-        self.host.as_deref().unwrap_or(&self.name)
+    /// Effective SSH destination passed on the ssh command line:
+    /// `user@host` when a separate `user` is configured and `host` itself
+    /// does not already embed `user@`, otherwise `host` (or `name` as fallback).
+    /// Returns an owned `String` because the `user@` prefix may need to be
+    /// synthesised and cannot borrow from a single field.
+    pub fn destination(&self) -> String {
+        let base = self.host.as_deref().unwrap_or(&self.name);
+        match self.user.as_deref() {
+            Some(user) if !user.trim().is_empty() && !base.contains('@') => {
+                format!("{user}@{base}")
+            }
+            _ => base.to_string(),
+        }
+    }
+
+    /// True when a non-empty `password` is configured and should trigger the
+    /// `sshpass`-based password-auth fallback (and suppress `BatchMode=yes`).
+    pub fn has_password(&self) -> bool {
+        self.password.as_deref().is_some_and(|p| !p.is_empty())
     }
 }
 
@@ -227,6 +273,9 @@ impl Config {
             }
             if connection.destination().trim().is_empty() {
                 bail!("connection {} has an empty host", connection.name);
+            }
+            if connection.port == Some(0) {
+                bail!("connection {}: port must be 1-65535", connection.name);
             }
             if connection.forwards.is_empty() {
                 bail!("connection {} has no forwards", connection.name);
