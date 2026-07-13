@@ -10,17 +10,59 @@ use autossh_core::{
 };
 use eframe::egui::{self, Color32, RichText};
 
-use crate::ssh_config::parse_ssh_config;
 pub use crate::ssh_config::SshHostEntry;
+use crate::ssh_config::parse_ssh_config;
 
-// ─── colour palette used in dialogs ───────────────────────────────────────────
+use crate::log::{FG_DIM, FG_ERROR, FG_MUTED, FG_PRIMARY, FG_SUCCESS, FG_WARNING};
 
-const FG_PRIMARY: Color32 = Color32::from_rgb(0, 220, 220);
-const FG_SUCCESS: Color32 = Color32::from_rgb(0, 200, 120);
-const FG_WARNING: Color32 = Color32::from_rgb(245, 200, 70);
-const FG_ERROR: Color32 = Color32::from_rgb(245, 90, 90);
-const FG_MUTED: Color32 = Color32::from_rgb(140, 145, 160);
-const FG_DIM: Color32 = Color32::from_rgb(90, 95, 110);
+// ─── Pickable trait (shared by both import dialogs) ───────────────────────
+
+trait Pickable {
+    fn picked(&self) -> bool;
+    fn set_picked(&mut self, v: bool);
+    fn is_dup(&self) -> bool;
+}
+
+/// Render a scrollable checklist with select-all, used by both import dialogs.
+fn pick_list<T: Pickable>(
+    ui: &mut egui::Ui, items: &mut [T],
+    render: impl Fn(&T, &mut egui::Ui),
+) {
+    let mut all = items.iter().filter(|c| !c.is_dup()).all(|c| c.picked());
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut all, "select all").changed() {
+            for c in items.iter_mut().filter(|c| !c.is_dup()) { c.set_picked(all); }
+        }
+    });
+    egui::ScrollArea::vertical()
+        .max_height(220.0).auto_shrink([false, false])
+        .show(ui, |ui| {
+            for c in items.iter_mut() {
+                let mut sel = c.picked();
+                ui.horizontal(|ui| {
+                    ui.add_enabled(!c.is_dup(), egui::Checkbox::new(&mut sel, ""));
+                    if sel != c.picked() { c.set_picked(sel); }
+                    render(c, ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if c.is_dup() { ui.colored_label(FG_WARNING, "(duplicate)"); }
+                        else if c.picked() { ui.colored_label(FG_PRIMARY, "✓"); }
+                    });
+                });
+            }
+        });
+}
+
+impl Pickable for CandidateConnection {
+    fn picked(&self) -> bool { self.selected }
+    fn set_picked(&mut self, v: bool) { self.selected = v; }
+    fn is_dup(&self) -> bool { self.duplicate }
+}
+
+impl Pickable for SshHostEntry {
+    fn picked(&self) -> bool { self.selected }
+    fn set_picked(&mut self, v: bool) { self.selected = v; }
+    fn is_dup(&self) -> bool { self.duplicate }
+}
 
 // ─── enums ─────────────────────────────────────────────────────────────────────
 
@@ -88,6 +130,7 @@ pub struct AddDialogState {
     /// Each entry is editable in-place inside the dialog (mode dropdown, free
     /// text, delete). Converted to `Vec<ForwardConfig>` only on commit.
     pub forwards: Vec<EditableForward>,
+    pub checked: Vec<bool>,
     pub draft_mode: ForwardMode,
     pub draft_forward: String,
     pub close: CloseAction,
@@ -99,6 +142,7 @@ impl Default for AddDialogState {
             name: String::new(),
             host: String::new(),
             forwards: Vec::new(),
+            checked: Vec::new(),
             // New connections default to remote forwards (the canonical autossh
             // pattern of opening an inbound tunnel to a client).
             draft_mode: ForwardMode::Remote,
@@ -175,6 +219,7 @@ pub struct CandidateConnection {
 
 /// Build an `AddDialogState` from an existing connection (e.g. for editing).
 pub fn state_from_connection(c: &ConnectionConfig) -> AddDialogState {
+    let n = c.forwards.len();
     AddDialogState {
         name: c.name.clone(),
         host: c.host.clone().unwrap_or_else(|| c.name.clone()),
@@ -186,6 +231,7 @@ pub fn state_from_connection(c: &ConnectionConfig) -> AddDialogState {
                 forward: f.forward.clone(),
             })
             .collect(),
+        checked: vec![false; n],
         // Carry the same default forward type as the add dialog for new lines.
         draft_mode: ForwardMode::Remote,
         draft_forward: String::new(),
@@ -235,17 +281,19 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
         // existing forwards: each is its own editable row.
         if state.forwards.is_empty() {
             ui.label(
-                RichText::new(
-                    "no ports yet — fill the row at the bottom and press ＋ add",
-                )
-                .small()
-                .color(FG_DIM),
+                RichText::new("no ports yet — fill the row at the bottom and press ＋ add")
+                    .small()
+                    .color(FG_DIM),
             );
         }
-        let mut drop_at: Option<usize> = None;
+        state.checked.resize(state.forwards.len(), false);
         for (i, fr) in state.forwards.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{}.", i + 1)).color(FG_MUTED));
+                let mut checked = *state.checked.get(i).unwrap_or(&false);
+                if ui.checkbox(&mut checked, "").changed() && i < state.checked.len() {
+                    state.checked[i] = checked;
+                }
                 egui::ComboBox::from_id_salt(("add_mode", i))
                     .selected_text(match fr.mode {
                         ForwardMode::Local => "L local",
@@ -260,13 +308,28 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
                         .hint_text("10022:127.0.0.1:22")
                         .desired_width(f32::INFINITY),
                 );
-                if ui.small_button("✕").clicked() {
-                    drop_at = Some(i);
-                }
             });
         }
-        if let Some(i) = drop_at {
-            state.forwards.remove(i);
+        let n_checked = state.checked.iter().filter(|&&c| c).count();
+        if n_checked > 0 {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(
+                        RichText::new(format!("\u{1f5d1}  delete checked ({n_checked})"))
+                            .color(FG_ERROR),
+                    )
+                    .clicked()
+                {
+                    let mut i = state.forwards.len();
+                    while i > 0 {
+                        i -= 1;
+                        if i < state.checked.len() && state.checked[i] {
+                            state.forwards.remove(i);
+                            state.checked.remove(i);
+                        }
+                    }
+                }
+            });
         }
 
         ui.add_space(4.0);
@@ -286,14 +349,13 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
                 });
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut state.draft_forward)
-                    .hint_text(
-                        "10022:127.0.0.1:22  (or  0.0.0.0:8080:127.0.0.1:80 for -L)",
-                    )
+                    .hint_text("10022:127.0.0.1:22  (or  0.0.0.0:8080:127.0.0.1:80 for -L)")
                     .desired_width(f32::INFINITY),
             );
-            let enter_pressed =
-                resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("＋ add").clicked() || enter_pressed {
+            // egui 0.29 singleline TextEdit surrenders focus on Enter but
+            // also consumes the key event — lost_focus() alone is reliable.
+            let submitted = resp.lost_focus();
+            if ui.button("+ add").clicked() || submitted {
                 let trimmed = state.draft_forward.trim().to_string();
                 if !trimmed.is_empty() {
                     state.forwards.push(EditableForward {
@@ -333,12 +395,19 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
 // ─── dialog UI: edit global value ─────────────────────────────────────────────
 
 pub fn run_edit_dialog_ui(ui: &mut egui::Ui, state: &mut EditDialogState) {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.close = CloseAction::Cancel("cancelled");
+    }
+
     ui.add_space(4.0);
-    ui.label(RichText::new(state.group.label()).strong().color(FG_PRIMARY));
-    let resp =
-        ui.add(egui::TextEdit::singleline(&mut state.value).desired_width(f32::INFINITY));
-    let enter_pressed =
-        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.label(
+        RichText::new(state.group.label())
+            .strong()
+            .color(FG_PRIMARY),
+    );
+    let resp = ui.add(egui::TextEdit::singleline(&mut state.value).desired_width(f32::INFINITY));
+    // egui 0.29 singleline surrenders focus on Enter but consumes the event.
+    let submitted = resp.lost_focus();
     ui.add_space(8.0);
     ui.label(
         RichText::new("Applied value is broadcast to every connection on save.")
@@ -347,7 +416,7 @@ pub fn run_edit_dialog_ui(ui: &mut egui::Ui, state: &mut EditDialogState) {
     );
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        if ui.button("✔  Apply").clicked() || enter_pressed {
+        if ui.button("✔  Apply").clicked() || submitted {
             if state.value.trim().parse::<u64>().is_ok() {
                 state.close = CloseAction::Commit;
             } else {
@@ -362,11 +431,7 @@ pub fn run_edit_dialog_ui(ui: &mut egui::Ui, state: &mut EditDialogState) {
 
 // ─── dialog UI: import from TOML ──────────────────────────────────────────────
 
-pub fn run_import_dialog_ui(
-    ui: &mut egui::Ui,
-    state: &mut ImportDialogState,
-    existing: &[String],
-) {
+pub fn run_import_dialog_ui(ui: &mut egui::Ui, state: &mut ImportDialogState, existing: &[String]) {
     // Esc closes the dialog regardless of its current state (loading, failed, populated).
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.close = CloseAction::Cancel("cancelled");
@@ -380,11 +445,11 @@ pub fn run_import_dialog_ui(
             .hint_text("~/path/to/another-autossh-config.toml")
             .desired_width(f32::INFINITY),
     );
-    let enter_pressed =
-        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    // egui 0.29 singleline surrenders focus on Enter but consumes the event.
+    let submitted = resp.lost_focus();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        if ui.button("📂  Load").clicked() || enter_pressed {
+        if ui.button("📂  Load").clicked() || submitted {
             state.try_load(existing);
         }
     });
@@ -406,9 +471,12 @@ pub fn run_import_dialog_ui(
     }
     ui.add_space(8.0);
     ui.label(
-        RichText::new(format!("{} candidate connection(s)", state.candidates.len()))
-            .small()
-            .color(FG_MUTED),
+        RichText::new(format!(
+            "{} candidate connection(s)",
+            state.candidates.len()
+        ))
+        .small()
+        .color(FG_MUTED),
     );
     ui.separator();
 
@@ -424,46 +492,15 @@ pub fn run_import_dialog_ui(
             ui.label(RichText::new(placeholder_text).small().color(FG_DIM));
         });
     } else {
-        let mut select_all = state.candidates.iter().all(|c| c.selected);
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut select_all, "select all").changed() {
-                for c in &mut state.candidates {
-                    if !c.duplicate {
-                        c.selected = select_all;
-                    }
-                }
-            }
-        });
-        egui::ScrollArea::vertical()
-            .max_height(220.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for c in &mut state.candidates {
-                    let enabled = !c.duplicate;
-                    let mut selected = c.selected;
-                    ui.horizontal(|ui| {
-                        ui.add_enabled(enabled, egui::Checkbox::new(&mut selected, ""));
-                        if selected != c.selected {
-                            c.selected = selected;
-                        }
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(&c.name).strong().color(Color32::WHITE));
-                            ui.label(
-                                RichText::new(format!("{}  ·  {} forwards", c.host, c.forwards.len()))
-                                    .small()
-                                    .color(FG_MUTED),
-                            );
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if c.duplicate {
-                                ui.colored_label(FG_WARNING, "(name already exists)");
-                            } else if c.selected {
-                                ui.colored_label(FG_PRIMARY, "✓");
-                            }
-                        });
-                    });
-                }
+        pick_list(ui, &mut state.candidates, |c, ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(&c.name).strong());
+                ui.label(
+                    RichText::new(format!("{}  ·  {} forwards", c.host, c.forwards.len()))
+                        .small().color(FG_MUTED),
+                );
             });
+        });
     }
 
     // ── footer: import + cancel buttons (always visible, even on load failure)
@@ -556,60 +593,21 @@ pub fn run_ssh_import_dialog_ui(
             ui.label(RichText::new(placeholder_text).small().color(FG_DIM));
         });
     } else {
-        let mut select_all = state.candidates.iter().all(|c| c.selected);
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut select_all, "select all").changed() {
-                for c in &mut state.candidates {
-                    if !c.duplicate {
-                        c.selected = select_all;
-                    }
-                }
-            }
-        });
-        egui::ScrollArea::vertical()
-            .max_height(220.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for c in &mut state.candidates {
-                    let enabled = !c.duplicate;
-                    let mut selected = c.selected;
-                    ui.horizontal(|ui| {
-                        ui.add_enabled(enabled, egui::Checkbox::new(&mut selected, ""));
-                        if selected != c.selected {
-                            c.selected = selected;
-                        }
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(&c.alias).strong().color(Color32::WHITE),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{}  ·  port {}",
-                                    c.destination, c.port
-                                ))
-                                .small()
-                                .color(FG_MUTED),
-                            );
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if c.duplicate {
-                                ui.colored_label(FG_WARNING, "(alias already exists)");
-                            } else if c.selected {
-                                ui.colored_label(FG_PRIMARY, "✓");
-                            }
-                        });
-                    });
-                }
+        pick_list(ui, &mut state.candidates, |c, ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(&c.alias).strong());
+                ui.label(
+                    RichText::new(format!("{}  ·  port {}", c.destination, c.port))
+                        .small().color(FG_MUTED),
+                );
             });
+        });
     }
 
     // footer (always visible)
     ui.add_space(8.0);
     ui.separator();
-    let any_selectable = state
-        .candidates
-        .iter()
-        .any(|c| c.selected && !c.duplicate);
+    let any_selectable = state.candidates.iter().any(|c| c.selected && !c.duplicate);
     ui.horizontal(|ui| {
         if ui
             .add_enabled(
@@ -680,8 +678,9 @@ impl SshImportState {
                 let entries: Vec<SshHostEntry> = candidates
                     .into_iter()
                     .map(|mut entry| {
+                        // 默认一个都不选，由用户通过 select all 或逐条勾选
                         entry.duplicate = existing.iter().any(|n| n == &entry.alias);
-                        entry.selected = !entry.duplicate;
+                        entry.selected = false;
                         entry
                     })
                     .collect();
@@ -704,7 +703,9 @@ impl SshImportState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autossh_core::{ConnectionConfig, ForwardConfig, ForwardMode, KeepaliveConfig, RetryConfig};
+    use autossh_core::{
+        ConnectionConfig, ForwardConfig, ForwardMode, KeepaliveConfig, RetryConfig,
+    };
 
     fn make_connection(name: &str, host: &str, forward: &str) -> ConnectionConfig {
         ConnectionConfig {

@@ -1,6 +1,15 @@
-//! Log entry types and parsing for supervisor stderr.
+//! Log entry types, shared colour palette, and supervisor stderr parsing.
 
 use egui::Color32;
+
+// ─── shared colour palette ──────────────────────────────────────────────────
+
+pub(crate) const FG_PRIMARY: Color32 = Color32::from_rgb(0, 220, 220);
+pub(crate) const FG_SUCCESS: Color32 = Color32::from_rgb(0, 200, 120);
+pub(crate) const FG_WARNING: Color32 = Color32::from_rgb(245, 200, 70);
+pub(crate) const FG_ERROR: Color32 = Color32::from_rgb(245, 90, 90);
+pub(crate) const FG_MUTED: Color32 = Color32::from_rgb(140, 145, 160);
+pub(crate) const FG_DIM: Color32 = Color32::from_rgb(90, 95, 110);
 
 /// How many log lines to keep in-memory before dropping old ones (oldest first).
 pub const LOG_BUFFER_LIMIT: usize = 2000;
@@ -38,10 +47,32 @@ impl Severity {
 
 #[derive(Clone)]
 pub struct LogEntry {
-    pub text: String,
     pub ts_secs: Option<u64>,
     pub severity: Severity,
     pub connection: Option<String>,
+    /// Short, human-readable event shown in the log panel.
+    pub message: String,
+}
+
+impl LogEntry {
+    /// Color lifecycle messages independently from their log severity: a
+    /// started connection is positive feedback, while a stopped/exited one
+    /// needs immediate attention even when the supervisor logged it as WARN.
+    pub fn event_color(&self) -> Color32 {
+        if self.message.starts_with("connected ·") {
+            Color32::from_rgb(0, 200, 120)
+        } else if self.message.starts_with("ssh exited ·")
+            || self.message.starts_with("supervisor stopped")
+        {
+            Color32::from_rgb(245, 90, 90)
+        } else {
+            match self.severity {
+                Severity::Info => Color32::from_rgb(0, 220, 220),
+                Severity::Warn => Color32::from_rgb(245, 200, 70),
+                Severity::Error => Color32::from_rgb(245, 90, 90),
+            }
+        }
+    }
 }
 
 /// Controls whether the log scroll area tracks the bottom or holds a fixed
@@ -74,12 +105,50 @@ pub fn parse_log_line(raw: &str) -> LogEntry {
         Severity::Info
     };
     let connection = parse_connection(raw);
+    let message = concise_message(raw, connection.as_deref());
     LogEntry {
-        text: raw.to_string(),
         ts_secs,
         severity,
         connection,
+        message,
     }
+}
+
+/// Keep only the event payload.  Splitting at the last `:` loses useful SSH
+/// details such as ports and exit statuses; strip only the known log prefix.
+fn concise_message(raw: &str, connection: Option<&str>) -> String {
+    let payload = raw
+        .split_once(']')
+        .map(|(_, rest)| rest.trim_start())
+        .unwrap_or(raw);
+    let payload = ["INFO ", "WARN ", "ERROR "]
+        .iter()
+        .find_map(|prefix| payload.strip_prefix(prefix))
+        .unwrap_or(payload);
+    let payload = connection
+        .and_then(|name| {
+            payload
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(':'))
+        })
+        .map(str::trim_start)
+        .unwrap_or(payload);
+    let payload = payload.strip_prefix("ssh: ").unwrap_or(payload);
+
+    if let Some(rest) = payload.strip_prefix("ssh process started ") {
+        format!("connected · {rest}")
+    } else if let Some(status) = payload.strip_prefix("ssh exited with ") {
+        format!("ssh exited · {status}")
+    } else {
+        payload.to_owned()
+    }
+}
+
+/// Authentication-method chatter is emitted by SSH during every reconnect but
+/// does not help an operator decide what to fix.  The connection lifecycle and
+/// actual forwarding failures remain visible.
+pub fn is_displayable(entry: &LogEntry) -> bool {
+    !entry.message.contains("using \"publickey\"")
 }
 
 /// Extract the Unix timestamp from a leading `[...]` bracket.
@@ -93,11 +162,7 @@ fn parse_ts(line: &str) -> Option<u64> {
 /// `[1715000000] ERROR home-server: ssh exited with 1`.
 /// Returns `None` for lines that carry no named connection context.
 fn parse_connection(line: &str) -> Option<String> {
-    let after_prefix = line
-        .trim_start_matches('[')
-        .split(']')
-        .nth(1)?
-        .trim_start();
+    let after_prefix = line.trim_start_matches('[').split(']').nth(1)?.trim_start();
     let after_level = after_prefix
         .strip_prefix("INFO ")
         .or_else(|| after_prefix.strip_prefix("WARN "))
@@ -137,7 +202,9 @@ mod tests {
     #[test]
     fn connection_name_requires_trailing_colon() {
         assert_eq!(
-            parse_log_line("[0] ERROR home-server: ssh exited with 1").connection.as_deref(),
+            parse_log_line("[0] ERROR home-server: ssh exited with 1")
+                .connection
+                .as_deref(),
             Some("home-server"),
         );
         assert_eq!(
@@ -167,5 +234,35 @@ mod tests {
         assert_eq!(Severity::Info.label(), "INFO");
         assert_eq!(Severity::Warn.label(), "WARN");
         assert_eq!(Severity::Error.label(), "ERROR");
+    }
+
+    #[test]
+    fn lifecycle_messages_use_distinct_colors() {
+        let started = parse_log_line("[0] INFO home: ssh process started (pid 1)");
+        let stopped = parse_log_line("[0] WARN home: ssh exited with exit status: 255");
+        assert_ne!(started.event_color(), stopped.event_color());
+        assert_eq!(started.event_color(), Color32::from_rgb(0, 200, 120));
+        assert_eq!(stopped.event_color(), Color32::from_rgb(245, 90, 90));
+    }
+
+    #[test]
+    fn message_preserves_ssh_ports_and_exit_statuses() {
+        let entry = parse_log_line(
+            "[1715000000] WARN home: ssh: remote port forwarding failed for listen port 10022",
+        );
+        assert_eq!(
+            entry.message,
+            "remote port forwarding failed for listen port 10022"
+        );
+
+        let entry = parse_log_line("[1715000000] WARN home: ssh exited with exit status: 255");
+        assert_eq!(entry.message, "ssh exited · exit status: 255");
+    }
+
+    #[test]
+    fn publickey_chatter_is_hidden() {
+        let entry =
+            parse_log_line("[0] WARN home: ssh: Authenticated to host using \"publickey\".");
+        assert!(!is_displayable(&entry));
     }
 }

@@ -3,3 +3,4 @@
 *.log.1
 /.pi-subagents/
 *lock*
+images

@@ -11,6 +11,7 @@
 //! Modal dialogs (add/edit/import) are rendered as `egui::Window` pop-ups.
 
 use std::{
+    collections::HashSet,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -18,23 +19,16 @@ use std::{
 use autossh_core::{Config, KeepaliveConfig, RetryConfig};
 use eframe::egui::{self, Color32, RichText};
 
-use crate::log::{format_unix_ts, LogEntry, LogScroll, LOG_BUFFER_LIMIT};
-use crate::modal::{
-    run_add_dialog_ui, run_edit_dialog_ui, run_import_dialog_ui,
-    run_ssh_import_dialog_ui, AddDialogState, CloseAction, EditableForward,
-    EditDialogState, GlobalGroup, Modal, SshImportState,
-    ImportDialogState, state_from_connection,
+use crate::log::{
+    FG_DIM, FG_ERROR, FG_MUTED, FG_PRIMARY, FG_SUCCESS, FG_WARNING, LOG_BUFFER_LIMIT,
+    LogEntry, LogScroll, format_unix_ts, is_displayable,
 };
-use crate::supervisor::{locate_supervisor, SupervisorHandle};
-
-// ─── palette ───────────────────────────────────────────────────────────────────
-
-pub(crate) const FG_PRIMARY: Color32 = Color32::from_rgb(0, 220, 220);
-pub(crate) const FG_SUCCESS: Color32 = Color32::from_rgb(0, 200, 120);
-pub(crate) const FG_WARNING: Color32 = Color32::from_rgb(245, 200, 70);
-pub(crate) const FG_ERROR: Color32 = Color32::from_rgb(245, 90, 90);
-pub(crate) const FG_MUTED: Color32 = Color32::from_rgb(140, 145, 160);
-pub(crate) const FG_DIM: Color32 = Color32::from_rgb(90, 95, 110);
+use crate::modal::{
+    AddDialogState, CloseAction, EditDialogState, EditableForward, GlobalGroup, ImportDialogState,
+    Modal, SshImportState, run_add_dialog_ui, run_edit_dialog_ui, run_import_dialog_ui,
+    run_ssh_import_dialog_ui, state_from_connection,
+};
+use crate::supervisor::{SupervisorHandle, locate_supervisor};
 
 /// Which pane the centre area is showing. Toggled via the segmented control
 /// in the dashboard.
@@ -61,6 +55,9 @@ pub struct AutosshApp {
 
     modal: Modal,
     msg: Option<(String, Instant)>,
+
+    /// Tracks which connections are checked for batch delete.
+    checked_conn: HashSet<usize>,
 }
 
 impl AutosshApp {
@@ -82,6 +79,7 @@ impl AutosshApp {
             log_scroll: LogScroll::default(),
             modal: Modal::None,
             msg: None,
+            checked_conn: HashSet::new(),
         })
     }
 
@@ -121,21 +119,33 @@ impl AutosshApp {
     }
 
     fn start_supervisor(&mut self) {
-        if self.supervisor.is_some() {
+        // A supervisor that exited is stale; discard its handle before a new
+        // Start All so the button can recover without restarting the UI.
+        if self.supervisor_running() {
             return;
         }
+        self.supervisor.take();
         let Some(binary) = locate_supervisor() else {
             self.flash("cannot find rust-autossh binary beside this UI; check PATH");
             return;
         };
         match SupervisorHandle::start(&binary, &self.config_path) {
             Ok(handle) => {
-                self.flash(format!("supervisor started: {}", binary.display()));
+                self.flash(format!("started all: {}", binary.display()));
                 self.supervisor = Some(handle);
             }
             Err(error) => {
-                self.flash(format!("cannot start supervisor: {error:#}"));
+                self.flash(format!("cannot start all: {error:#}"));
             }
+        }
+    }
+
+    fn stop_supervisor(&mut self) {
+        if let Some(handle) = self.supervisor.take() {
+            // Graceful shutdown so supervisor can flush closing log lines
+            // (SIGTERM → drain → SIGKILL fallback).
+            handle.shutdown(&mut self.logs);
+            self.flash("stopped all");
         }
     }
 
@@ -143,10 +153,55 @@ impl AutosshApp {
         let Some(handle) = self.supervisor.as_ref() else {
             return;
         };
-        handle.drain(&mut self.logs);
+        let mut entries = Vec::new();
+        handle.drain(&mut entries);
+        self.logs.extend(entries.into_iter().filter(is_displayable));
         if self.logs.len() > LOG_BUFFER_LIMIT {
             let excess = self.logs.len() - (LOG_BUFFER_LIMIT - 100);
             self.logs.drain(..excess);
+        }
+    }
+
+    fn supervisor_running(&self) -> bool {
+        self.supervisor
+            .as_ref()
+            .is_some_and(SupervisorHandle::alive)
+    }
+
+    /// Persist the desired state immediately: the core supervisor watches the
+    /// config file and starts/stops just this worker after its next poll.
+    fn toggle_connection(&mut self, index: usize) {
+        let running = self.supervisor_running();
+        let Some(connection) = self.config.connections.get_mut(index) else {
+            return;
+        };
+        let was_enabled = connection.enabled;
+        let name = connection.name.clone();
+        // An enabled connection is only running while its supervisor is alive.
+        // Thus an inactive row always means Start, even if it was enabled in a
+        // config loaded before the supervisor was launched.
+        let start = !running || !was_enabled;
+        connection.enabled = start;
+
+        if let Err(error) = self.config.save(&self.config_path) {
+            if let Some(connection) = self.config.connections.get_mut(index) {
+                connection.enabled = was_enabled;
+            }
+            self.flash(format!(
+                "cannot {} {name}: {error:#}",
+                if start { "start" } else { "stop" }
+            ));
+            return;
+        }
+        self.dirty = false;
+
+        if start {
+            self.flash(format!("starting {name}"));
+            if !running {
+                self.start_supervisor();
+            }
+        } else {
+            self.flash(format!("stopping {name}"));
         }
     }
 
@@ -170,10 +225,12 @@ impl eframe::App for AutosshApp {
         self.poll_supervisor();
         self.prune_msg();
         self.render_dashboard(ctx);
-        self.render_connections_panel(ctx);
-        self.render_logs_panel(ctx);
-        self.render_centre_panel(ctx);
+        // Modal first so any applied changes are visible in the same frame.
         self.render_modal(ctx);
+        // Bottom log panel before side/centre so it spans full width.
+        self.render_logs_panel(ctx);
+        self.render_connections_panel(ctx);
+        self.render_centre_panel(ctx);
         if self.supervisor.is_some() {
             // Re-paint continuously while the supervisor is alive so new lines
             // appear without user interaction.
@@ -182,6 +239,9 @@ impl eframe::App for AutosshApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Drop the supervisor now, rather than relying on process teardown.
+        // Its Drop implementation also terminates all spawned SSH descendants.
+        self.supervisor.take();
         // Best-effort save so the user does not silently lose edits.
         if self.dirty {
             let _ = self.config.save(&self.config_path);
@@ -217,6 +277,19 @@ impl AutosshApp {
                     RichText::new(self.config_path.display().to_string())
                         .color(Color32::from_rgb(180, 200, 220)),
                 );
+                if let Some((message, _)) = &self.msg {
+                    let color = if message.starts_with("starting ")
+                        || message.starts_with("supervisor started")
+                    {
+                        FG_SUCCESS
+                    } else if message.starts_with("stopping ") {
+                        FG_ERROR
+                    } else {
+                        FG_MUTED
+                    };
+                    ui.separator();
+                    ui.label(RichText::new(message).small().color(color));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
                     ui.label(
@@ -225,9 +298,7 @@ impl AutosshApp {
                             .strong(),
                     );
                     ui.separator();
-                    ui.label(
-                        RichText::new(dirty_chip.0).color(dirty_chip.1).strong(),
-                    );
+                    ui.label(RichText::new(dirty_chip.0).color(dirty_chip.1).strong());
                     ui.separator();
                     ui.label(
                         RichText::new(format!("logs: {}", self.logs.len()))
@@ -250,11 +321,14 @@ impl AutosshApp {
 
 impl AutosshApp {
     fn render_connections_panel(&mut self, ctx: &egui::Context) {
+        // Keep the top row balanced: Connections and Centre each take half
+        // of the width above the full-width Logs panel.
+        let top_column_width = ctx.available_rect().width() / 2.0;
         egui::SidePanel::left("connections")
-            .resizable(true)
-            .default_width(260.0)
-            .width_range(200.0..=420.0)
+            .resizable(false)
+            .exact_width(top_column_width)
             .show(ctx, |ui| {
+                let mut delete_selected = false;
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
@@ -276,8 +350,22 @@ impl AutosshApp {
                                 ..SshImportState::default()
                             });
                         }
-                        if ui.button("＋  Add").clicked() {
+                        // Use ASCII `+`: the full-width plus (`＋`) renders as a
+                        // missing-glyph box in the Windows system font fallback.
+                        if ui.button("+  Add").clicked() {
                             self.modal = Modal::Add(AddDialogState::default());
+                        }
+                        let n = self.checked_conn.len();
+                        if ui
+                            .add_enabled(
+                                n > 0,
+                                egui::Button::new(
+                                    RichText::new(format!("🗑  delete ({n})")).color(FG_ERROR),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            delete_selected = true;
                         }
                     });
                 });
@@ -290,7 +378,7 @@ impl AutosshApp {
                         ui.label(RichText::new("(no connections)").color(FG_MUTED));
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new("press “＋  Add” to start")
+                            RichText::new("press “+  Add” to start")
                                 .small()
                                 .color(FG_DIM),
                         );
@@ -298,86 +386,83 @@ impl AutosshApp {
                     return;
                 }
 
-                let mut delete_at: Option<usize> = None;
+                let mut toggle_at: Option<usize> = None;
                 let mut edit_at: Option<usize> = None;
+                let supervisor_running = self.supervisor_running();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, conn) in self.config.connections.iter().enumerate() {
-                            let selected = i == self.selected_connection;
-                            let frame = egui::Frame::group(ui.style())
-                                .fill(if selected {
-                                    Color32::from_rgb(34, 56, 70)
-                                } else {
-                                    Color32::from_rgb(24, 28, 34)
-                                })
-                                .stroke(egui::Stroke::new(
-                                    if selected { 1.0 } else { 0.5 },
-                                    if selected { FG_PRIMARY } else { FG_DIM },
-                                ))
+                            let sel = i == self.selected_connection;
+                            let (fill, sw, sc) = if sel {
+                                (Color32::from_rgb(34, 56, 70), 1.0, FG_PRIMARY)
+                            } else {
+                                (Color32::from_rgb(24, 28, 34), 0.5, FG_DIM)
+                            };
+                            egui::Frame::group(ui.style())
+                                .fill(fill).stroke(egui::Stroke::new(sw, sc))
                                 .rounding(egui::Rounding::same(4.0))
-                                .inner_margin(egui::Margin::symmetric(10.0, 8.0));
-                            frame.show(ui, |ui| {
+                                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let dot_color = if conn.enabled {
-                                        FG_SUCCESS
-                                    } else {
-                                        FG_WARNING
+                                    // checkbox
+                                    let mut cb = self.checked_conn.contains(&i);
+                                    if ui.checkbox(&mut cb, "")
+                                        .on_hover_text("Select for batch deletion")
+                                        .changed()
+                                    {
+                                        if cb { self.checked_conn.insert(i); }
+                                        else { self.checked_conn.remove(&i); }
+                                    }
+                                    // status dot
+                                    let running = supervisor_running && conn.enabled;
+                                    ui.colored_label(
+                                        if running { FG_SUCCESS } else { FG_MUTED }, "●",
+                                    );
+                                    // clickable details (select on click, edit on double-click)
+                                    let mut mk = |text: RichText| {
+                                        ui.add(egui::Label::new(text).sense(egui::Sense::click()))
                                     };
-                                    ui.colored_label(dot_color, "●");
-                                    ui.vertical(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new(&conn.name)
-                                                    .strong()
-                                                    .color(Color32::WHITE),
-                                            );
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if ui.small_button("delete").clicked() {
-                                                        delete_at = Some(i);
-                                                    }
-                                                },
-                                            );
-                                        });
-                                        ui.label(
-                                            RichText::new(conn.destination())
-                                                .small()
-                                                .color(FG_MUTED),
-                                        );
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} forwards",
-                                                conn.forwards.len()
-                                            ))
-                                            .small()
-                                            .color(FG_PRIMARY),
-                                        );
-                                    });
+                                    let r1 = mk(RichText::new(&conn.name).strong());
+                                    let r2 = mk(RichText::new(conn.destination()).small().color(FG_MUTED));
+                                    let r3 = mk(RichText::new(format!("{} forwards", conn.forwards.len()))
+                                        .small().color(FG_PRIMARY));
+                                    let clicked = r1.clicked() || r2.clicked() || r3.clicked();
+                                    let dbl = r1.double_clicked() || r2.double_clicked() || r3.double_clicked();
+                                    if clicked { self.selected_connection = i; }
+                                    if dbl { edit_at = Some(i); }
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let label = if running { "■  Stop" } else { "▶  Start" };
+                                            if ui.small_button(label).clicked() { toggle_at = Some(i); }
+                                        },
+                                    );
                                 });
-                                let interact =
-                                    ui.interact(ui.max_rect(), ui.id().with(i), egui::Sense::click());
-                                if interact.clicked() {
-                                    self.selected_connection = i;
-                                }
-                                if interact.double_clicked() {
-                                    edit_at = Some(i);
-                                }
                             });
                             ui.add_space(4.0);
                         }
                     });
 
-                if let Some(i) = delete_at {
-                    let removed = self.config.connections.remove(i);
+                if let Some(i) = toggle_at {
+                    self.toggle_connection(i);
+                }
+                if delete_selected {
+                    let mut indices: Vec<usize> = self.checked_conn.iter().copied().collect();
+                    indices.sort_unstable_by(|a, b| b.cmp(a)); // descending
+                    let count = indices.len();
+                    for i in indices {
+                        self.config.connections.remove(i);
+                    }
+                    self.checked_conn.clear();
                     self.dirty = true;
-                    self.flash(format!("deleted {}", removed.name));
                     if self.selected_connection >= self.config.connections.len()
                         && self.selected_connection > 0
                     {
-                        self.selected_connection -= 1;
+                        self.selected_connection = self.config.connections.len().saturating_sub(1);
                     }
+                    self.flash(format!("deleted {count} connection(s)"));
                 }
                 if let Some(i) = edit_at {
                     let conn = self.config.connections[i].clone();
@@ -404,8 +489,18 @@ impl AutosshApp {
                     if ui.button("💾  Save").clicked() {
                         self.save();
                     }
-                    if self.supervisor.is_none() && ui.button("▶  Start supervisor").clicked() {
-                        self.start_supervisor();
+                    let all_running = self.supervisor_running();
+                    let all_label = if all_running {
+                        "■  Stop All"
+                    } else {
+                        "▶  Start All"
+                    };
+                    if ui.button(all_label).clicked() {
+                        if all_running {
+                            self.stop_supervisor();
+                        } else {
+                            self.start_supervisor();
+                        }
                     }
                 });
             });
@@ -420,142 +515,82 @@ impl AutosshApp {
     fn render_globals(&mut self, ui: &mut egui::Ui) {
         let ka = self.keepalive();
         let r = self.retry();
+        let mut sel = self.selected_global.min(5);
 
-        let mut selected_group = self.selected_global.min(5);
+        let keepalive: [(usize, GlobalGroup, String); 3] = [
+            (0, GlobalGroup::KeepaliveInterval, format!("{} s", ka.interval)),
+            (1, GlobalGroup::KeepaliveCount, format!("{}", ka.count_max)),
+            (2, GlobalGroup::KeepaliveTimeout, format!("{} s", ka.connect_timeout)),
+        ];
+        let retry: [(usize, GlobalGroup, String); 3] = [
+            (3, GlobalGroup::RetryInitial, format!("{} s", r.initial_seconds)),
+            (4, GlobalGroup::RetryMaximum, format!("{} s", r.maximum_seconds)),
+            (5, GlobalGroup::RetryStable, format!("{} s", r.stable_seconds)),
+        ];
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(8.0);
-            ui.columns(2, |columns| {
-                columns[0].group(|ui| {
-                    ui.add_space(4.0);
-                    ui.heading("Keepalive");
-                    ui.add_space(4.0);
-                    self.render_global_row(
-                        ui,
-                        0,
-                        &mut selected_group,
-                        GlobalGroup::KeepaliveInterval,
-                        format!("{} s", ka.interval),
-                    );
-                    self.render_global_row(
-                        ui,
-                        1,
-                        &mut selected_group,
-                        GlobalGroup::KeepaliveCount,
-                        format!("{}", ka.count_max),
-                    );
-                    self.render_global_row(
-                        ui,
-                        2,
-                        &mut selected_group,
-                        GlobalGroup::KeepaliveTimeout,
-                        format!("{} s", ka.connect_timeout),
-                    );
-                });
-                columns[1].group(|ui| {
-                    ui.add_space(4.0);
-                    ui.heading("Retry");
-                    ui.add_space(4.0);
-                    self.render_global_row(
-                        ui,
-                        3,
-                        &mut selected_group,
-                        GlobalGroup::RetryInitial,
-                        format!("{} s", r.initial_seconds),
-                    );
-                    self.render_global_row(
-                        ui,
-                        4,
-                        &mut selected_group,
-                        GlobalGroup::RetryMaximum,
-                        format!("{} s", r.maximum_seconds),
-                    );
-                    self.render_global_row(
-                        ui,
-                        5,
-                        &mut selected_group,
-                        GlobalGroup::RetryStable,
-                        format!("{} s", r.stable_seconds),
-                    );
-                });
+            ui.columns(2, |cols| {
+                for (i, rows) in [&keepalive, &retry].iter().enumerate() {
+                    cols[i].group(|ui| {
+                        ui.add_space(4.0);
+                        ui.heading(if i == 0 { "Keepalive" } else { "Retry" });
+                        ui.add_space(4.0);
+                        for (idx, group, value) in rows.iter() {
+                            self.render_global_row(ui, *idx, &mut sel, *group, value.clone());
+                        }
+                    });
+                }
             });
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
-                    "values are shared by every connection; click a row to highlight, double-click to edit",
-                )
-                .small()
-                .color(FG_MUTED),
+                RichText::new("shared by every connection; click to highlight, double-click to edit")
+                    .small()
+                    .color(FG_MUTED),
             );
             ui.add_space(8.0);
             ui.collapsing("Active connections", |ui| {
                 for (i, c) in self.config.connections.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{}.", i + 1)).color(FG_MUTED));
-                        ui.label(RichText::new(&c.name).strong().color(Color32::WHITE));
+                        ui.label(RichText::new(&c.name).strong());
                         ui.label(RichText::new(format!("→ {}", c.destination())).color(FG_MUTED));
                     });
                 }
             });
         });
-        self.selected_global = selected_group;
+        self.selected_global = sel;
     }
 
-    /// One keepalive/retry row. Click sets the selection; double-click
-    /// (or the inline "edit" link) opens the editor modal for that field.
     fn render_global_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        selected: &mut usize,
-        group: GlobalGroup,
-        value: String,
+        &mut self, ui: &mut egui::Ui, index: usize, selected: &mut usize,
+        group: GlobalGroup, value: String,
     ) {
         let is_sel = *selected == index;
-        let frame = egui::Frame::group(ui.style())
-            .fill(if is_sel {
-                Color32::from_rgb(34, 56, 70)
-            } else {
-                Color32::from_rgb(24, 28, 34)
-            })
-            .stroke(egui::Stroke::new(
-                if is_sel { 1.0 } else { 0.5 },
-                if is_sel { FG_PRIMARY } else { FG_DIM },
-            ))
+        let (fill, sw, sc) = if is_sel {
+            (Color32::from_rgb(34, 56, 70), 1.0, FG_PRIMARY)
+        } else {
+            (Color32::from_rgb(24, 28, 34), 0.5, FG_DIM)
+        };
+        let response = egui::Frame::group(ui.style())
+            .fill(fill)
+            .stroke(egui::Stroke::new(sw, sc))
             .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0));
-        let response = frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
+            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.vertical(|ui| {
                     ui.label(RichText::new(group.label()).color(FG_MUTED).small());
                     ui.label(RichText::new(&value).strong().color(FG_PRIMARY).monospace());
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Label::new(RichText::new("✎  edit").color(FG_PRIMARY).small())
-                                .sense(egui::Sense::click()),
-                        )
-                        .clicked()
-                    {
-                        *selected = index;
-                        self.modal = Modal::EditGlobal {
-                            group,
-                            value: value.clone(),
-                        };
-                    }
-                });
             });
-        });
         let interact = response.response.interact(egui::Sense::click());
         if interact.clicked() {
             *selected = index;
         }
         if interact.double_clicked() {
             *selected = index;
-            self.modal = Modal::EditGlobal {
-                group,
-                value: value.clone(),
-            };
+            self.modal = Modal::EditGlobal { group, value };
         }
     }
 
@@ -566,7 +601,11 @@ impl AutosshApp {
         for (key, desc) in HELP_ROWS {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.label(RichText::new(format!("{:<16}", key)).strong().color(FG_PRIMARY));
+                ui.label(
+                    RichText::new(format!("{:<16}", key))
+                        .strong()
+                        .color(FG_PRIMARY),
+                );
                 ui.label(*desc);
             });
         }
@@ -574,7 +613,9 @@ impl AutosshApp {
         ui.label(RichText::new("Failure handling").strong().size(14.0));
         ui.add_space(4.0);
         ui.label("When a connection's ssh process exits or fails to start, the supervisor:");
-        ui.label("  • reads exit code from the supervisor log line tagged with the connection name");
+        ui.label(
+            "  • reads exit code from the supervisor log line tagged with the connection name",
+        );
         ui.label(
             "  • sleeps `retry.initial_seconds`, doubling each failure up to `retry.maximum_seconds`",
         );
@@ -607,11 +648,9 @@ impl AutosshApp {
                             self.logs.clear();
                         }
                         ui.separator();
-                        if ui
-                            .selectable_label(self.log_scroll.follow, "follow")
-                            .clicked()
+                        if ui.checkbox(&mut self.log_scroll.follow, "follow").changed()
+                            && self.log_scroll.follow
                         {
-                            self.log_scroll.follow = true;
                             self.log_scroll.offset_from_bottom = 0;
                         }
                     });
@@ -662,7 +701,7 @@ impl AutosshApp {
                                 ui.label(
                                     RichText::new(format!("{time} "))
                                         .monospace()
-                                        .color(FG_DIM),
+                                        .color(ui.visuals().weak_text_color()),
                                 );
                                 // severity badge
                                 let (badge_text, badge_bg) = (
@@ -670,6 +709,7 @@ impl AutosshApp {
                                     entry.severity.badge(),
                                 );
                                 let badge_fg = entry.severity.foreground();
+                                let event_color = entry.event_color();
                                 egui::Frame::group(ui.style())
                                     .fill(badge_bg)
                                     .rounding(egui::Rounding::same(3.0))
@@ -687,27 +727,14 @@ impl AutosshApp {
                                     ui.label(
                                         RichText::new(conn.clone())
                                             .strong()
-                                            .color(FG_PRIMARY),
+                                            .color(event_color),
                                     );
-                                    let message = entry
-                                        .text
-                                        .rsplit_once(':')
-                                        .map(|(_, rest)| rest.trim_start())
-                                        .unwrap_or(&entry.text);
                                     ui.label(
-                                        RichText::new(format!(": {message}"))
-                                            .color(Color32::from_rgb(220, 222, 230)),
+                                        RichText::new(format!(": {}", entry.message))
+                                            .color(event_color),
                                     );
                                 } else {
-                                    let message = entry
-                                        .text
-                                        .splitn(3, ' ')
-                                        .nth(2)
-                                        .unwrap_or(&entry.text);
-                                    ui.label(
-                                        RichText::new(message.to_string())
-                                            .color(Color32::from_rgb(220, 222, 230)),
-                                    );
+                                    ui.label(RichText::new(&entry.message).color(event_color));
                                 }
                             });
                         }
@@ -816,16 +843,18 @@ impl AutosshApp {
                     .into_iter()
                     .map(EditableForward::into_forward)
                     .collect();
-                self.config.connections.push(autossh_core::ConnectionConfig {
-                    name: state.name.trim().to_string(),
-                    host: Some(state.host.trim().to_string()),
-                    enabled: true,
-                    ssh_path: None,
-                    keepalive: self.keepalive(),
-                    retry: self.retry(),
-                    extra_args: Vec::new(),
-                    forwards,
-                });
+                self.config
+                    .connections
+                    .push(autossh_core::ConnectionConfig {
+                        name: state.name.trim().to_string(),
+                        host: Some(state.host.trim().to_string()),
+                        enabled: true,
+                        ssh_path: None,
+                        keepalive: self.keepalive(),
+                        retry: self.retry(),
+                        extra_args: Vec::new(),
+                        forwards,
+                    });
                 self.dirty = true;
                 self.selected_connection = self.config.connections.len() - 1;
                 self.flash(format!("added {}", state.name.trim()));
@@ -924,16 +953,18 @@ impl AutosshApp {
                         skipped += 1;
                         continue;
                     }
-                    self.config.connections.push(autossh_core::ConnectionConfig {
-                        name: cand.name.clone(),
-                        host: Some(cand.host),
-                        enabled: true,
-                        ssh_path: None,
-                        keepalive: cand.keepalive,
-                        retry: cand.retry,
-                        extra_args: Vec::new(),
-                        forwards: cand.forwards,
-                    });
+                    self.config
+                        .connections
+                        .push(autossh_core::ConnectionConfig {
+                            name: cand.name.clone(),
+                            host: Some(cand.host),
+                            enabled: true,
+                            ssh_path: None,
+                            keepalive: cand.keepalive,
+                            retry: cand.retry,
+                            extra_args: Vec::new(),
+                            forwards: cand.forwards,
+                        });
                     imported += 1;
                     next_selected = self.config.connections.len() - 1;
                 }
@@ -985,16 +1016,18 @@ impl AutosshApp {
                         mode: autossh_core::ForwardMode::Remote,
                         forward: "10022:127.0.0.1:22".to_string(),
                     };
-                    self.config.connections.push(autossh_core::ConnectionConfig {
-                        name: cand.alias.clone(),
-                        host: Some(cand.destination.clone()),
-                        enabled: true,
-                        ssh_path: None,
-                        keepalive: self.keepalive(),
-                        retry: self.retry(),
-                        extra_args: Vec::new(),
-                        forwards: vec![placeholder],
-                    });
+                    self.config
+                        .connections
+                        .push(autossh_core::ConnectionConfig {
+                            name: cand.alias.clone(),
+                            host: Some(cand.destination.clone()),
+                            enabled: true,
+                            ssh_path: None,
+                            keepalive: self.keepalive(),
+                            retry: self.retry(),
+                            extra_args: Vec::new(),
+                            forwards: vec![placeholder],
+                        });
                     imported += 1;
                     next_selected = self.config.connections.len() - 1;
                 }
@@ -1021,8 +1054,8 @@ impl AutosshApp {
 
 const HELP_ROWS: &[(&str, &str)] = &[
     (
-        "Start supervisor",
-        "spawns rust-autossh run; streams stderr into the bottom log pane.",
+        "Start All / Stop All",
+        "starts or stops the supervisor and all enabled connections; streams stderr into the bottom log pane.",
     ),
     (
         "Save",
@@ -1038,7 +1071,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ),
     (
         "Globals panel",
-        "shared keepalive/retry values; click a row to highlight, ✎ edit / double-click to change.",
+        "shared keepalive/retry values; click a row to highlight, double-click to change.",
     ),
     (
         "Logs panel",

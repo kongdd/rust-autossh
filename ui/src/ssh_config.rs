@@ -38,34 +38,31 @@ pub fn parse_ssh_config(path: &std::path::Path) -> anyhow::Result<Vec<SshHostEnt
     let mut user = String::new();
     let mut port: u16 = 22;
 
-    let push_aliases = |entries: &mut Vec<SshHostEntry>,
-                        aliases: &[String],
-                        host: &str,
-                        user: &str,
-                        port: u16| {
-        for alias in aliases {
-            if alias.contains('*') || alias.contains('?') {
-                continue;
+    let push_aliases =
+        |entries: &mut Vec<SshHostEntry>, aliases: &[String], host: &str, user: &str, port: u16| {
+            for alias in aliases {
+                if alias.contains('*') || alias.contains('?') {
+                    continue;
+                }
+                let hostname = if host.is_empty() {
+                    alias.clone()
+                } else {
+                    host.to_string()
+                };
+                let destination = if user.is_empty() {
+                    format!("{hostname}:{port}")
+                } else {
+                    format!("{user}@{hostname}:{port}")
+                };
+                entries.push(SshHostEntry {
+                    alias: alias.clone(),
+                    destination,
+                    port,
+                    selected: true,
+                    duplicate: false,
+                });
             }
-            let hostname = if host.is_empty() {
-                alias.clone()
-            } else {
-                host.to_string()
-            };
-            let destination = if user.is_empty() {
-                format!("{hostname}:{port}")
-            } else {
-                format!("{user}@{hostname}:{port}")
-            };
-            entries.push(SshHostEntry {
-                alias: alias.clone(),
-                destination,
-                port,
-                selected: true,
-                duplicate: false,
-            });
-        }
-    };
+        };
 
     for raw in text.lines() {
         // Strip trailing `#` comments; OpenSSH treats `#` as a line comment.
@@ -116,27 +113,11 @@ pub fn parse_ssh_config(path: &std::path::Path) -> anyhow::Result<Vec<SshHostEnt
 mod tests {
     use super::*;
 
-    fn make_connection(name: &str, host: &str, forward: &str) -> autossh_core::ConnectionConfig {
-        autossh_core::ConnectionConfig {
-            name: name.into(),
-            host: Some(host.into()),
-            enabled: true,
-            ssh_path: None,
-            keepalive: autossh_core::KeepaliveConfig::default(),
-            retry: autossh_core::RetryConfig::default(),
-            extra_args: Vec::new(),
-            forwards: vec![autossh_core::ForwardConfig {
-                mode: autossh_core::ForwardMode::Local,
-                forward: forward.into(),
-            }],
-        }
-    }
-
     #[test]
     fn parse_ssh_config_extracts_aliases_and_skips_wildcard() {
         let dir = std::env::temp_dir().join("autossh-ui-ssh-tests");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config");
+        let path = dir.join("aliases");
         let _ = std::fs::remove_file(&path);
         std::fs::write(
             &path,
@@ -180,7 +161,7 @@ mod tests {
     fn parse_ssh_config_handles_default_port_and_user() {
         let dir = std::env::temp_dir().join("autossh-ui-ssh-tests");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config");
+        let path = dir.join("defaults");
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, "Host solo\n  HostName solo.example.com\n").unwrap();
         let entries = parse_ssh_config(&path).unwrap();

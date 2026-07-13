@@ -3,16 +3,27 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Prevent `ssh.exe` from allocating a visible console when launched by the
+/// native GUI or the background supervisor.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 use crate::config::{ConnectionConfig, ForwardMode};
 
 pub fn spawn(connection: &ConnectionConfig) -> std::io::Result<Child> {
     let program = connection.ssh_path.clone().unwrap_or_else(default_ssh_path);
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args(connection))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.spawn()
 }
 
 pub fn args(connection: &ConnectionConfig) -> Vec<String> {

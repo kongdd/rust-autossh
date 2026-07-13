@@ -60,6 +60,7 @@ fn main() -> Result<()> {
         "autossh-ui",
         native_options,
         Box::new(|cc| {
+            install_windows_icon_fonts(&cc.egui_ctx);
             cc.egui_ctx.set_visuals(visuals());
             Ok(Box::new(app))
         }),
@@ -96,7 +97,46 @@ pub fn default_path() -> PathBuf {
     PathBuf::from(home).join(".config/autossh/config.toml")
 }
 
-// ─── theme ─────────────────────────────────────────────────────────────────────
+// ─── fonts and theme ──────────────────────────────────────────────────────────
+
+/// eframe ships portable default fonts rather than using the Windows font
+/// fallback chain. Register the two Windows symbol fonts explicitly so the UI
+/// glyphs (`●`, `✓`, `✎`, `＋`) do not turn into tofu boxes.
+#[cfg(target_os = "windows")]
+fn install_windows_icon_fonts(ctx: &egui::Context) {
+    use eframe::egui::{FontData, FontDefinitions, FontFamily};
+
+    let font_dir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts");
+    let mut fonts = FontDefinitions::default();
+
+    for (name, filename, first) in [
+        ("Segoe UI Symbol", "seguisym.ttf", true),
+        ("Segoe UI Emoji", "seguiemj.ttf", false),
+    ] {
+        let Ok(bytes) = std::fs::read(font_dir.join(filename)) else {
+            continue;
+        };
+        fonts
+            .font_data
+            .insert(name.to_owned(), FontData::from_owned(bytes));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            let family_fonts = fonts.families.entry(family).or_default();
+            if first {
+                family_fonts.insert(0, name.to_owned());
+            } else {
+                family_fonts.push(name.to_owned());
+            }
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// No system-font configuration is needed outside Windows.
+#[cfg(not(target_os = "windows"))]
+fn install_windows_icon_fonts(_ctx: &egui::Context) {}
 
 /// Visuals tuned for a darker palette than the OS default so the colour-coded
 /// log badges stay legible.
