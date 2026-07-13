@@ -4,7 +4,7 @@
 
 ## Features
 
-- Multiple `-R` and `-L` tunnels from one TOML configuration;
+- Multiple `-R`, `-L`, and `-D` (SOCKS proxy) tunnels from one TOML configuration;
 - `BatchMode`, `ExitOnForwardFailure`, connect timeout, and SSH-layer keepalives by default;
 - Retry backoff with reset after a stable connection;
 - Configuration hot reload every two seconds: saving a valid TOML file restarts connections; an invalid update keeps the current set alive;
@@ -30,7 +30,11 @@ Copy and edit [`config.example.toml`](config.example.toml), then validate it. Th
 .\rust-autossh.exe run --config %USERPROFILE%\.config\autossh\config.toml
 ```
 
-Each `[[connections]]` block creates one `ssh` process. `name` is its unique log identifier; optional `host` is the SSH destination (host/IP/alias) and defaults to `name` for backward compatibility. Its `forwards` array may mix any number of `-L` and `-R` mappings. SSH host aliases and all ordinary settings in `%USERPROFILE%\.ssh\config` work unchanged. Configure key-based authentication or `ssh-agent`; password prompts are disabled by `BatchMode=yes`.
+Each `[[connections]]` block creates one `ssh` process. `name` is its unique log identifier; optional `host` is the SSH destination (host/IP/alias) and defaults to `name` for backward compatibility. Its `forwards` array may mix any number of `-L`, `-R`, and `-D` (local SOCKS proxy) mappings.
+
+For `-L` and `-R` the spec is `[bind:]listen_port:target_host:target_port`; the format is identical — what changes is *which side* listens and *which side* owns the target: `-L` listens on the client and targets the server; `-R` listens on the server and targets the client. For `-D` the spec is `[bind:]port` only — a local SOCKS proxy whose target is chosen by the SOCKS client per request.
+
+SSH host aliases and all ordinary settings in `%USERPROFILE%\.ssh\config` work unchanged. Configure key-based authentication or `ssh-agent`; password prompts are disabled by `BatchMode=yes`.
 
 `extra_args` is an array of individual arguments, not one shell command. For example:
 

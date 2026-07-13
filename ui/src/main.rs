@@ -89,19 +89,35 @@ fn parse_args() -> PathBuf {
     path
 }
 
-/// Default config path: `$HOME/.config/autossh/config.toml`.
+/// Default config path.
+///
+/// Linux/macOS: `$HOME/.config/autossh/config.toml` (XDG Base Directory).
+/// Windows: `%APPDATA%\autossh\config.toml`. USERPROFILE is *not* a valid
+/// fallback on Windows because `~\.config` does not exist by default and
+/// silently creates an inaccessible directory the first time the UI runs.
 pub fn default_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .unwrap_or_else(|| ".".into());
-    PathBuf::from(home).join(".config/autossh/config.toml")
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("autossh").join("config.toml");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+        return PathBuf::from(home).join(".config").join("autossh").join("config.toml");
+    }
+    #[allow(unreachable_code)]
+    PathBuf::from(".").join("autossh").join("config.toml")
 }
 
 // ─── fonts and theme ──────────────────────────────────────────────────────────
 
 /// eframe ships portable default fonts rather than using the Windows font
-/// fallback chain. Register the two Windows symbol fonts explicitly so the UI
-/// glyphs (`●`, `✓`, `✎`, `＋`) do not turn into tofu boxes.
+/// fallback chain. Register the Windows system fonts explicitly so that:
+///   * UI glyphs (`●`, `✓`, `✎`, `＋`) do not turn into tofu boxes, and
+///   * CJK characters in connection names / hosts render correctly without
+///     the user having to install a separate font.
 #[cfg(target_os = "windows")]
 fn install_windows_icon_fonts(ctx: &egui::Context) {
     use eframe::egui::{FontData, FontDefinitions, FontFamily};
@@ -112,9 +128,14 @@ fn install_windows_icon_fonts(ctx: &egui::Context) {
         .join("Fonts");
     let mut fonts = FontDefinitions::default();
 
+    // (font_name, file, position) — first=true inserts at index 0 (highest priority),
+    // first=false appends as a fallback. Symbol + Emoji + a CJK font cover the
+    // glyphs that show up in practice; msyh.ttc is present on every Windows 7+
+    // install and contains Microsoft YaHei UI plus the UI variant.
     for (name, filename, first) in [
         ("Segoe UI Symbol", "seguisym.ttf", true),
         ("Segoe UI Emoji", "seguiemj.ttf", false),
+        ("Microsoft YaHei UI", "msyh.ttc", false),
     ] {
         let Ok(bytes) = std::fs::read(font_dir.join(filename)) else {
             continue;

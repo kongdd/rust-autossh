@@ -217,6 +217,24 @@ pub struct CandidateConnection {
 
 // ─── helpers ───────────────────────────────────────────────────────────────────
 
+/// Compact label used in the per-row mode dropdown (existing forwards + draft).
+fn forward_mode_label(mode: ForwardMode) -> &'static str {
+    match mode {
+        ForwardMode::Local => "L local",
+        ForwardMode::Remote => "R remote",
+        ForwardMode::Dynamic => "D dynamic",
+    }
+}
+
+/// Mode-aware placeholder: hint states which side listens vs targets.
+fn forward_hint(mode: ForwardMode) -> &'static str {
+    match mode {
+        ForwardMode::Local => "0.0.0.0:8080:127.0.0.1:80  (listen on client → target on server)",
+        ForwardMode::Remote => "10022:127.0.0.1:22  (listen on server → target on client)",
+        ForwardMode::Dynamic => "1080  (or  0.0.0.0:1080 for an open SOCKS proxy)",
+    }
+}
+
 /// Build an `AddDialogState` from an existing connection (e.g. for editing).
 pub fn state_from_connection(c: &ConnectionConfig) -> AddDialogState {
     let n = c.forwards.len();
@@ -295,17 +313,15 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
                     state.checked[i] = checked;
                 }
                 egui::ComboBox::from_id_salt(("add_mode", i))
-                    .selected_text(match fr.mode {
-                        ForwardMode::Local => "L local",
-                        ForwardMode::Remote => "R remote",
-                    })
+                    .selected_text(forward_mode_label(fr.mode))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut fr.mode, ForwardMode::Local, "L local");
-                        ui.selectable_value(&mut fr.mode, ForwardMode::Remote, "R remote");
+                        ui.selectable_value(&mut fr.mode, ForwardMode::Local, forward_mode_label(ForwardMode::Local));
+                        ui.selectable_value(&mut fr.mode, ForwardMode::Remote, forward_mode_label(ForwardMode::Remote));
+                        ui.selectable_value(&mut fr.mode, ForwardMode::Dynamic, forward_mode_label(ForwardMode::Dynamic));
                     });
                 ui.add(
                     egui::TextEdit::singleline(&mut fr.forward)
-                        .hint_text("10022:127.0.0.1:22")
+                        .hint_text(forward_hint(fr.mode))
                         .desired_width(f32::INFINITY),
                 );
             });
@@ -339,17 +355,15 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState) {
         // row for adding a new port (always visible so users can keep extending)
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("draft_mode")
-                .selected_text(match state.draft_mode {
-                    ForwardMode::Local => "L local",
-                    ForwardMode::Remote => "R remote",
-                })
+                .selected_text(forward_mode_label(state.draft_mode))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Local, "L local");
-                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Remote, "R remote");
+                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Local, forward_mode_label(ForwardMode::Local));
+                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Remote, forward_mode_label(ForwardMode::Remote));
+                    ui.selectable_value(&mut state.draft_mode, ForwardMode::Dynamic, forward_mode_label(ForwardMode::Dynamic));
                 });
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut state.draft_forward)
-                    .hint_text("10022:127.0.0.1:22  (or  0.0.0.0:8080:127.0.0.1:80 for -L)")
+                    .hint_text(forward_hint(state.draft_mode))
                     .desired_width(f32::INFINITY),
             );
             // egui 0.29 singleline TextEdit surrenders focus on Enter but

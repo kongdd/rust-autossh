@@ -1,14 +1,17 @@
 # Default config path: ~/.config/autossh/config.toml
 # Use --config to specify a different path.
-# Each [[connections]] block starts one ssh process with any number of -L / -R forwards.
+# Each [[connections]] block starts one ssh process with any number of -L / -R / -D forwards.
 # Authentication uses ordinary ~/.ssh/config (keys, agent, Host aliases).
 
 [[connections]]
 name = "home-server"
-host = "c005"
+host = "amd"
 forwards = [
-  { mode = "local",  forward = "0.0.0.0:8080:127.0.0.1:8080" },
-  { mode = "remote", forward = "1081:192.168.31.1:7890" },
+  # L/R: [bind:]port:host:port — listen side and target side swap per mode.
+  { mode = "local",   forward = "0.0.0.0:8080:127.0.0.1:8080" },  # client → server
+  { mode = "remote",  forward = "1081:192.168.31.1:7890" },        # server → client
+  # D: [bind:]port — local SOCKS, no target (SOCKS client picks it).
+  { mode = "dynamic", forward = "1080" },                          # loopback only
 ]
 
 # keepalive: ServerAliveInterval / ServerAliveCountMax / ConnectTimeout (seconds).

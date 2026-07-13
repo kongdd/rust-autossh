@@ -191,14 +191,20 @@ struct ForwardInfo {
 
 impl ForwardInfo {
     fn from_config(forward: &ForwardConfig) -> Self {
-        let parsed = parse_forward_spec(&forward.forward);
+        let parsed = match forward.mode {
+            ForwardMode::Dynamic => parse_dynamic_spec(&forward.forward),
+            ForwardMode::Local | ForwardMode::Remote => parse_forward_spec(&forward.forward)
+                .map(|(host, port, target_host, target_port)| {
+                    (host, port, Some(target_host), Some(target_port))
+                }),
+        };
         Self {
             mode: forward.mode,
             raw: forward.forward.clone(),
             listen_host: parsed.as_ref().and_then(|parsed| parsed.0.clone()),
             listen_port: parsed.as_ref().map(|parsed| parsed.1.clone()),
-            target_host: parsed.as_ref().map(|parsed| parsed.2.clone()),
-            target_port: parsed.map(|parsed| parsed.3),
+            target_host: parsed.as_ref().and_then(|parsed| parsed.2.clone()),
+            target_port: parsed.as_ref().and_then(|parsed| parsed.3.clone()),
         }
     }
 
@@ -206,6 +212,7 @@ impl ForwardInfo {
         match self.mode {
             ForwardMode::Local => "-L",
             ForwardMode::Remote => "-R",
+            ForwardMode::Dynamic => "-D",
         }
     }
 
@@ -225,9 +232,17 @@ impl ForwardInfo {
     }
 
     fn display(&self) -> String {
-        match (self.listen_display(), self.target_display()) {
-            (Some(listen), Some(target)) => format!("{} {listen} -> {target}", self.flag()),
-            _ => format!("{} {}", self.flag(), self.raw),
+        match self.mode {
+            ForwardMode::Dynamic => match self.listen_display() {
+                Some(listen) => format!("{} {listen}", self.flag()),
+                None => format!("{} {}", self.flag(), self.raw),
+            },
+            _ => match (self.listen_display(), self.target_display()) {
+                (Some(listen), Some(target)) => {
+                    format!("{} {listen} -> {target}", self.flag())
+                }
+                _ => format!("{} {}", self.flag(), self.raw),
+            },
         }
     }
 
@@ -259,6 +274,10 @@ impl ForwardInfo {
     }
 
     fn matches_target(&self, target_host: &str, target_port: &str) -> bool {
+        if self.mode == ForwardMode::Dynamic {
+            // SOCKS proxies have no configured target — the client picks it.
+            return false;
+        }
         self.target_port.as_deref() == Some(target_port)
             && self
                 .target_host
@@ -287,6 +306,7 @@ impl ChannelInfo {
                 let flag = match self.mode {
                     ForwardMode::Local => "-L",
                     ForwardMode::Remote => "-R",
+                    ForwardMode::Dynamic => "-D",
                 };
                 match (&self.listen, &self.target) {
                     (Some(listen), Some(target)) => format!("{flag} {listen} -> {target}"),
@@ -333,6 +353,18 @@ fn parse_forward_spec(spec: &str) -> Option<(Option<String>, String, String, Str
             target_host.clone(),
             target_port.clone(),
         )),
+        _ => None,
+    }
+}
+
+/// `ssh -D [bind:]port` — no target; rendered like an `-L`/`-R` listen side.
+fn parse_dynamic_spec(spec: &str) -> Option<(Option<String>, String, Option<String>, Option<String>)> {
+    let parts = split_forward_spec(spec);
+    match parts.as_slice() {
+        [port] if !port.is_empty() => Some((None, port.clone(), None, None)),
+        [host, port] if !host.is_empty() && !port.is_empty() => {
+            Some((Some(host.clone()), port.clone(), None, None))
+        }
         _ => None,
     }
 }

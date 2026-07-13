@@ -43,6 +43,31 @@ fn creates_multiple_ssh_forward_arguments() {
 }
 
 #[test]
+fn emits_dynamic_forward_argument_as_dash_d() {
+    let mut conn = connection();
+    conn.forwards.push(ForwardConfig {
+        mode: ForwardMode::Dynamic,
+        forward: "1080".into(),
+    });
+    let args = args(&conn);
+    assert!(
+        args.windows(2).any(|part| part == ["-D", "1080"]),
+        "missing -D port pair in {args:?}"
+    );
+}
+
+#[test]
+fn emits_dynamic_forward_with_bind_address() {
+    let mut conn = connection();
+    conn.forwards = vec![ForwardConfig {
+        mode: ForwardMode::Dynamic,
+        forward: "0.0.0.0:1080".into(),
+    }];
+    let args = args(&conn);
+    assert!(args.windows(2).any(|part| part == ["-D", "0.0.0.0:1080"]));
+}
+
+#[test]
 fn name_remains_the_default_destination() {
     let mut connection = connection();
     connection.host = None;

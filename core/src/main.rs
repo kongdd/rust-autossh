@@ -241,11 +241,22 @@ keepalive = { interval = 60, count_max = 3 }
 "##;
 
 fn default_config_path() -> PathBuf {
-    // Per-user XDG-style config on every platform: $HOME/.config/autossh/config.toml.
-    // HOME is set on Linux and macOS; Windows uses USERPROFILE as a fallback when HOME
-    // is missing (e.g. a service host that has no interactive shell profile).
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .unwrap_or_else(|| ".".into());
-    PathBuf::from(home).join(".config/autossh/config.toml")
+    // Linux/macOS follow the XDG Base Directory spec: $XDG_CONFIG_HOME or
+    // $HOME/.config. Windows has no XDG convention, so use %APPDATA% (Roaming),
+    // which every Windows SKU since Vista guarantees to exist for the current
+    // user. Falling back to USERPROFILE would create a stray `\.config`
+    // directory that Windows File Explorer cannot open.
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("autossh").join("config.toml");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+        return PathBuf::from(home).join(".config").join("autossh").join("config.toml");
+    }
+    #[allow(unreachable_code)]
+    PathBuf::from(".").join("autossh").join("config.toml")
 }

@@ -42,9 +42,10 @@ pub struct ConnectionConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardConfig {
-    /// `remote` → `ssh -R`; `local` → `ssh -L`.
+    /// `remote` → `ssh -R`; `local` → `ssh -L`; `dynamic` → `ssh -D` (SOCKS proxy).
     pub mode: ForwardMode,
-    /// `10022:127.0.0.1:22`, etc.
+    /// For `local` / `remote`: `[bind:]host:port:target_host:target_port` (e.g. `10022:127.0.0.1:22`).
+    /// For `dynamic`: `[bind:]port` (e.g. `1080` or `0.0.0.0:1080`).
     pub forward: String,
 }
 
@@ -53,6 +54,8 @@ pub struct ForwardConfig {
 pub enum ForwardMode {
     Local,
     Remote,
+    /// `ssh -D` — local SOCKS proxy listening on `[bind:]port`.
+    Dynamic,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -103,6 +106,63 @@ fn default_retry_maximum() -> u64 {
 }
 fn default_retry_stable() -> u64 {
     60
+}
+
+/// `ssh -L` / `-R` spec: `[bind_host:]listen_port:target_host:target_port` with at
+/// least a listen port and a target (so `port:host:port` or `host:port:host:port`).
+fn is_valid_static_forward_spec(spec: &str) -> bool {
+    let parts = split_forward_spec(spec);
+    let target_port = match parts.as_slice() {
+        [port, _host, tport] => Some((port, tport)),
+        [host, port, _host, tport] => Some((port, tport)).map(|p| {
+            let _ = host;
+            p
+        }),
+        _ => None,
+    };
+    match target_port {
+        Some((listen_port, target_port)) => {
+            is_valid_port(listen_port) && is_valid_port(target_port)
+        }
+        None => false,
+    }
+}
+
+/// `ssh -D` spec: `[bind_host:]port` where the trailing segment is the only required
+/// one and must be a valid TCP port. IPv6 binds keep their `[…]` brackets.
+fn is_valid_dynamic_forward_spec(spec: &str) -> bool {
+    let parts = split_forward_spec(spec);
+    let port = match parts.as_slice() {
+        [port] => port,
+        [_host, port] => port,
+        _ => return false,
+    };
+    is_valid_port(port)
+}
+
+fn is_valid_port(text: &str) -> bool {
+    text.parse::<u16>().is_ok()
+}
+
+/// Split a forward spec on `:` while respecting IPv6 brackets so that
+/// `[::1]:1080` parses as `["[::1]", "1080"]` rather than four junk segments.
+fn split_forward_spec(spec: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut in_brackets = false;
+    for (idx, ch) in spec.char_indices() {
+        match ch {
+            '[' => in_brackets = true,
+            ']' => in_brackets = false,
+            ':' if !in_brackets => {
+                parts.push(&spec[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&spec[start..]);
+    parts
 }
 impl Default for KeepaliveConfig {
     fn default() -> Self {
@@ -171,12 +231,32 @@ impl Config {
             if connection.forwards.is_empty() {
                 bail!("connection {} has no forwards", connection.name);
             }
-            if connection
-                .forwards
-                .iter()
-                .any(|forward| forward.forward.trim().is_empty())
-            {
-                bail!("connection {} has an empty forward", connection.name);
+            for forward in &connection.forwards {
+                let spec = forward.forward.trim();
+                if spec.is_empty() {
+                    bail!("connection {} has an empty forward", connection.name);
+                }
+                match forward.mode {
+                    ForwardMode::Local | ForwardMode::Remote => {
+                        if !is_valid_static_forward_spec(spec) {
+                            bail!(
+                                "connection {}: forward {:?} for mode {:?} must be `[bind:]listen_port:target_host:target_port`",
+                                connection.name,
+                                forward.forward,
+                                forward.mode,
+                            );
+                        }
+                    }
+                    ForwardMode::Dynamic => {
+                        if !is_valid_dynamic_forward_spec(spec) {
+                            bail!(
+                                "connection {}: forward {:?} for dynamic mode must be `[bind:]port` (1-65535)",
+                                connection.name,
+                                forward.forward,
+                            );
+                        }
+                    }
+                }
             }
             if !names.insert(&connection.name) {
                 bail!("duplicate connection name: {}", connection.name);

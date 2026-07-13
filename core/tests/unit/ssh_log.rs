@@ -73,3 +73,38 @@ fn falls_back_to_configured_forwards_without_channel_context() {
     assert!(line.contains("channel mapping unavailable"));
     assert!(line.contains("configured forwards=[-L 8080 -> 127.0.0.1:8080]"));
 }
+
+#[test]
+fn dynamic_forward_displays_bind_and_port_without_target() {
+    let mut conn = connection();
+    conn.forwards = vec![ForwardConfig {
+        mode: ForwardMode::Dynamic,
+        forward: "0.0.0.0:1080".into(),
+    }];
+    let mut annotator = SshStderrAnnotator::new(&conn);
+    let line = annotator
+        .annotate("channel 1: open failed: administratively prohibited")
+        .unwrap();
+    assert!(
+        line.contains("-D 0.0.0.0:1080"),
+        "expected -D display, got: {line}"
+    );
+    assert!(
+        !line.contains("->"),
+        "dynamic forwards have no configured target, got: {line}"
+    );
+}
+
+#[test]
+fn dynamic_forward_accepts_bare_port_spec() {
+    let mut conn = connection();
+    conn.forwards = vec![ForwardConfig {
+        mode: ForwardMode::Dynamic,
+        forward: "1080".into(),
+    }];
+    let mut annotator = SshStderrAnnotator::new(&conn);
+    let line = annotator
+        .annotate("channel 1: open failed: administratively prohibited")
+        .unwrap();
+    assert!(line.contains("-D 1080"));
+}

@@ -222,12 +222,12 @@ impl AutosshApp {
 
 impl eframe::App for AutosshApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Phase 1: 所有状态变更在此完成 ──
         self.poll_supervisor();
         self.prune_msg();
-        self.render_dashboard(ctx);
-        // Modal first so any applied changes are visible in the same frame.
         self.render_modal(ctx);
-        // Bottom log panel before side/centre so it spans full width.
+        // ── Phase 2: 渲染（只读 self，零写）──
+        self.render_dashboard(ctx);
         self.render_logs_panel(ctx);
         self.render_connections_panel(ctx);
         self.render_centre_panel(ctx);
@@ -517,15 +517,19 @@ impl AutosshApp {
         let r = self.retry();
         let mut sel = self.selected_global.min(5);
 
-        let keepalive: [(usize, GlobalGroup, String); 3] = [
-            (0, GlobalGroup::KeepaliveInterval, format!("{} s", ka.interval)),
-            (1, GlobalGroup::KeepaliveCount, format!("{}", ka.count_max)),
-            (2, GlobalGroup::KeepaliveTimeout, format!("{} s", ka.connect_timeout)),
+        // (display, edit): display keeps the human-readable suffix for the
+        // readout; edit is the raw number so the EditGlobal modal can parse it
+        // back into a u64. Mixing the two is the bug that turned "30 s" into
+        // an un-parseable initial value.
+        let keepalive: [(usize, GlobalGroup, (String, String)); 3] = [
+            (0, GlobalGroup::KeepaliveInterval, (format!("{} s", ka.interval), ka.interval.to_string())),
+            (1, GlobalGroup::KeepaliveCount, (ka.count_max.to_string(), ka.count_max.to_string())),
+            (2, GlobalGroup::KeepaliveTimeout, (format!("{} s", ka.connect_timeout), ka.connect_timeout.to_string())),
         ];
-        let retry: [(usize, GlobalGroup, String); 3] = [
-            (3, GlobalGroup::RetryInitial, format!("{} s", r.initial_seconds)),
-            (4, GlobalGroup::RetryMaximum, format!("{} s", r.maximum_seconds)),
-            (5, GlobalGroup::RetryStable, format!("{} s", r.stable_seconds)),
+        let retry: [(usize, GlobalGroup, (String, String)); 3] = [
+            (3, GlobalGroup::RetryInitial, (format!("{} s", r.initial_seconds), r.initial_seconds.to_string())),
+            (4, GlobalGroup::RetryMaximum, (format!("{} s", r.maximum_seconds), r.maximum_seconds.to_string())),
+            (5, GlobalGroup::RetryStable, (format!("{} s", r.stable_seconds), r.stable_seconds.to_string())),
         ];
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -536,8 +540,8 @@ impl AutosshApp {
                         ui.add_space(4.0);
                         ui.heading(if i == 0 { "Keepalive" } else { "Retry" });
                         ui.add_space(4.0);
-                        for (idx, group, value) in rows.iter() {
-                            self.render_global_row(ui, *idx, &mut sel, *group, value.clone());
+                        for (idx, group, (display, edit)) in rows.iter() {
+                            self.render_global_row(ui, *idx, &mut sel, *group, display.clone(), edit.clone());
                         }
                     });
                 }
@@ -564,7 +568,7 @@ impl AutosshApp {
 
     fn render_global_row(
         &mut self, ui: &mut egui::Ui, index: usize, selected: &mut usize,
-        group: GlobalGroup, value: String,
+        group: GlobalGroup, display: String, edit: String,
     ) {
         let is_sel = *selected == index;
         let (fill, sw, sc) = if is_sel {
@@ -581,7 +585,7 @@ impl AutosshApp {
                 ui.set_width(ui.available_width());
                 ui.vertical(|ui| {
                     ui.label(RichText::new(group.label()).color(FG_MUTED).small());
-                    ui.label(RichText::new(&value).strong().color(FG_PRIMARY).monospace());
+                    ui.label(RichText::new(&display).strong().color(FG_PRIMARY).monospace());
                 });
             });
         let interact = response.response.interact(egui::Sense::click());
@@ -590,7 +594,7 @@ impl AutosshApp {
         }
         if interact.double_clicked() {
             *selected = index;
-            self.modal = Modal::EditGlobal { group, value };
+            self.modal = Modal::EditGlobal { group, value: edit };
         }
     }
 
@@ -1063,7 +1067,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ),
     (
         "Add connection",
-        "name + host + one or more forwards, each typed as <listen>:<host>:<port>.",
+        "name + host + one or more forwards; L/R use `[bind:]port:host:port`, D (SOCKS) uses `[bind:]port`.",
     ),
     (
         "Import hosts",

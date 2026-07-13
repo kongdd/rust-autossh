@@ -49,6 +49,7 @@ pub fn args(connection: &ConnectionConfig) -> Vec<String> {
             match forward.mode {
                 ForwardMode::Local => "-L",
                 ForwardMode::Remote => "-R",
+                ForwardMode::Dynamic => "-D",
             }
             .into(),
         );

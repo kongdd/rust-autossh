@@ -28,6 +28,57 @@ fn rejects_invalid_retry_range() {
 }
 
 #[test]
+fn rejects_dynamic_forward_without_port() {
+    let mut config = Config {
+        log: LogConfig::default(),
+        connections: vec![connection()],
+    };
+    config.connections[0].forwards = vec![ForwardConfig {
+        mode: ForwardMode::Dynamic,
+        forward: "0.0.0.0:".into(),
+    }];
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn rejects_dynamic_forward_with_extra_target_segments() {
+    // `-D` only takes `[bind:]port`; anything with a third colon is rejected so
+    // users do not silently produce an invalid `ssh -D` invocation.
+    let mut config = Config {
+        log: LogConfig::default(),
+        connections: vec![connection()],
+    };
+    config.connections[0].forwards = vec![ForwardConfig {
+        mode: ForwardMode::Dynamic,
+        forward: "1080:127.0.0.1:8080".into(),
+    }];
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn accepts_dynamic_forward_specs() {
+    let mut config = Config {
+        log: LogConfig::default(),
+        connections: vec![connection()],
+    };
+    config.connections[0].forwards = vec![
+        ForwardConfig {
+            mode: ForwardMode::Dynamic,
+            forward: "1080".into(),
+        },
+        ForwardConfig {
+            mode: ForwardMode::Dynamic,
+            forward: "0.0.0.0:1080".into(),
+        },
+        ForwardConfig {
+            mode: ForwardMode::Dynamic,
+            forward: "[::1]:1080".into(),
+        },
+    ];
+    assert!(config.validate().is_ok());
+}
+
+#[test]
 fn save_and_load_roundtrip() {
     let dir = std::env::temp_dir().join("autossh-ui-roundtrip");
     std::fs::create_dir_all(&dir).unwrap();
