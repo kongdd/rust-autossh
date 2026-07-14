@@ -2,14 +2,11 @@
 //!
 //! `AutosshApp` holds the configuration, the supervisor handle, the log buffer,
 //! the modal state machine, and the Windows tray icon. Per-frame work runs in
-//! three phases inside [`eframe::App::update`]:
+//! Work is split across the two phases provided by [`eframe::App`]:
 //!
-//! 1. **State mutation** — `update_windows_tray`, `poll_supervisor`,
-//!    [`prune_msg`](Self::prune_msg), modal dispatch.
-//! 2. **Rendering** — `render_dashboard`, `render_connections_panel`,
-//!    `render_centre_panel`, `render_logs_panel`, `render_modal`.
-//! 3. **Repaint scheduling** — request a follow-up frame while the supervisor
-//!    is alive so log lines stream in without user interaction.
+//! 1. [`eframe::App::logic`] mutates state and handles tray commands. It also
+//!    runs while the native window is hidden, which keeps Show and Exit usable.
+//! 2. [`eframe::App::ui`] renders the dashboard, panels, logs, and modal.
 
 use std::{
     collections::HashSet,
@@ -126,24 +123,24 @@ impl AutosshApp {
 // ─── eframe entry ──────────────────────────────────────────────────────────────
 
 impl eframe::App for AutosshApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── Phase 1: state mutation ──
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "windows")]
         self.update_windows_tray(ctx);
         self.poll_supervisor();
         self.friday.poll();
         self.prune_msg();
-        self.render_modal(ctx);
-        // ── Phase 2: read-only rendering ──
-        self.render_dashboard(ctx);
-        self.render_logs_panel(ctx);
-        self.render_connections_panel(ctx);
-        self.render_centre_panel(ctx);
         if self.supervisor.is_some() || self.friday.is_active() {
-            // Re-paint continuously while a background worker is alive so new
-            // log lines and Friday listener transitions appear immediately.
+            // Keep background state flowing even while the window is hidden.
             ctx.request_repaint_after(Duration::from_millis(150));
         }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render_modal(ui.ctx());
+        self.render_dashboard(ui);
+        self.render_logs_panel(ui);
+        self.render_connections_panel(ui);
+        self.render_centre_panel(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

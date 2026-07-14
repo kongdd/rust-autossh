@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "ui"]
+members = ["crate/core", "crate/friday", "crate/ui"]
 resolver = "2"
 
 [profile.release]

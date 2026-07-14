@@ -1,6 +1,6 @@
 //! Log entry types, shared colour palette, and supervisor stderr parsing.
 
-use egui::Color32;
+use eframe::egui::Color32;
 
 // ─── shared colour palette ──────────────────────────────────────────────────
 

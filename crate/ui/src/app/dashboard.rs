@@ -8,8 +8,8 @@ use crate::log::{FG_ERROR, FG_MUTED, FG_PRIMARY, FG_SUCCESS, FG_WARNING};
 use super::AutosshApp;
 
 impl AutosshApp {
-    pub fn render_dashboard(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("dashboard").show(ctx, |ui| {
+    pub fn render_dashboard(&mut self, root: &mut egui::Ui) {
+        egui::Panel::top("dashboard").show_inside(root, |ui| {
             let dirty_chip = if self.dirty {
                 ("● unsaved", FG_WARNING)
             } else {

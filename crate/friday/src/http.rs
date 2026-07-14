@@ -53,7 +53,7 @@ pub(super) fn serve(
         return Ok(());
     }
 
-    let server = Server::http(LISTEN_ADDR)
+    let server = build_listener(LISTEN_ADDR)
         .map_err(|error| format!("cannot listen on {LISTEN_ADDR}: {error}"))?;
     let _ = events.started(player.clone());
     let active_requests = Arc::new(AtomicUsize::new(0));
@@ -208,6 +208,55 @@ fn method_not_allowed(allow: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut response = text_response(405, "method not allowed\n");
     response.add_header(Header::from_bytes("Allow", allow).expect("static HTTP header is valid"));
     response
+}
+
+/// Build a `tiny_http::Server` bound to `addr`, with `SO_REUSEADDR` set on
+/// Windows so that stopping and immediately restarting the listener does not
+/// fail with `WSAEADDRINUSE` (os error 10048).
+///
+/// On other platforms the kernel's default behaviour is already permissive
+/// enough, so we fall back to the plain `Server::http` path.
+fn build_listener(addr: &str) -> Result<Server, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::net::ToSocketAddrs;
+
+        let std_addr = addr
+            .to_socket_addrs()
+            .map_err(|error| format!("invalid address {addr}: {error}"))?
+            .next()
+            .ok_or_else(|| format!("no address resolved for {addr}"))?;
+        let sock_addr = socket2::SockAddr::from(std_addr);
+
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .map_err(|error| format!("cannot create socket: {error}"))?;
+        // Rust std 的 TcpListener::bind 和 tiny_http::Server::http 在 Windows
+        // 上默认不开 SO_REUSEADDR，Stop 后立即重启 17322 会撞
+        // WSAEADDRINUSE (os error 10048)。
+        socket
+            .set_reuse_address(true)
+            .map_err(|error| format!("cannot set SO_REUSEADDR: {error}"))?;
+        socket
+            .bind(&sock_addr)
+            .map_err(|error| format!("cannot bind to {addr}: {error}"))?;
+        // tiny_http holds the listener in non-blocking mode internally; the
+        // listen backlog only needs to be generous enough for local clients.
+        socket
+            .listen(64)
+            .map_err(|error| format!("cannot listen on {addr}: {error}"))?;
+
+        let std_listener: std::net::TcpListener = socket.into();
+        Server::from_listener(std_listener, None)
+            .map_err(|error| format!("cannot build HTTP server: {error}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Server::http(addr).map_err(|error| format!("cannot listen on {addr}: {error}"))
+    }
 }
 
 #[cfg(test)]

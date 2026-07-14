@@ -140,7 +140,7 @@ fn install_windows_icon_fonts(ctx: &egui::Context) {
         };
         fonts
             .font_data
-            .insert(name.to_owned(), FontData::from_owned(bytes));
+            .insert(name.to_owned(), FontData::from_owned(bytes).into());
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             let family_fonts = fonts.families.entry(family).or_default();
             if first {
@@ -163,7 +163,7 @@ fn visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
     let visuals = &mut v;
     visuals.override_text_color = Some(Color32::from_rgb(235, 238, 245));
-    visuals.window_rounding = egui::Rounding::same(6.0);
+    visuals.window_corner_radius = egui::CornerRadius::same(6);
     // Softer dark palette so connection entries / globals cards stay legible
     // without sinking the whole window into near-black.
     visuals.window_fill = Color32::from_rgb(37, 42, 51);

@@ -9,14 +9,14 @@ use crate::modal::{Modal, state_from_connection};
 use super::AutosshApp;
 
 impl AutosshApp {
-    pub fn render_connections_panel(&mut self, ctx: &egui::Context) {
+    pub fn render_connections_panel(&mut self, root: &mut egui::Ui) {
         // Keep the top row balanced: Connections and Centre each take half
         // of the width above the full-width Logs panel.
-        let top_column_width = ctx.available_rect().width() / 2.0;
-        egui::SidePanel::left("connections")
+        let top_column_width = root.available_width() / 2.0;
+        egui::Panel::left("connections")
             .resizable(false)
-            .exact_width(top_column_width)
-            .show(ctx, |ui| {
+            .exact_size(top_column_width)
+            .show_inside(root, |ui| {
                 let mut delete_selected = false;
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -91,8 +91,8 @@ impl AutosshApp {
                             egui::Frame::group(ui.style())
                                 .fill(fill)
                                 .stroke(egui::Stroke::new(sw, sc))
-                                .rounding(egui::Rounding::same(4.0))
-                                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(10, 8))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         // checkbox

@@ -9,8 +9,8 @@ use friday::{FridayState, LISTEN_ADDR};
 use super::AutosshApp;
 
 impl AutosshApp {
-    pub fn render_centre_panel(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    pub fn render_centre_panel(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(root, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -233,8 +233,8 @@ impl AutosshApp {
         let response = egui::Frame::group(ui.style())
             .fill(fill)
             .stroke(egui::Stroke::new(sw, sc))
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.vertical(|ui| {

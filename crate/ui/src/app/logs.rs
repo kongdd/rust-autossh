@@ -7,12 +7,12 @@ use crate::log::{FG_DIM, FG_MUTED, LOG_BUFFER_LIMIT, format_unix_ts};
 use super::AutosshApp;
 
 impl AutosshApp {
-    pub fn render_logs_panel(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("logs")
+    pub fn render_logs_panel(&mut self, root: &mut egui::Ui) {
+        egui::Panel::bottom("logs")
             .resizable(true)
-            .default_height(220.0)
-            .height_range(120.0..=460.0)
-            .show(ctx, |ui| {
+            .default_size(220.0)
+            .size_range(120.0..=460.0)
+            .show_inside(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     ui.heading("Logs");
@@ -90,8 +90,8 @@ impl AutosshApp {
                                 let event_color = entry.event_color();
                                 egui::Frame::group(ui.style())
                                     .fill(badge_bg)
-                                    .rounding(egui::Rounding::same(3.0))
-                                    .inner_margin(egui::Margin::same(0.0))
+                                    .corner_radius(egui::CornerRadius::same(3))
+                                    .inner_margin(egui::Margin::same(0))
                                     .show(ui, |ui| {
                                         ui.label(
                                             RichText::new(badge_text)

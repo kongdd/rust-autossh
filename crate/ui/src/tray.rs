@@ -51,14 +51,15 @@ impl WindowsTray {
 
         let tray_ctx = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            // tray-icon 0.21/0.24 register the tray's window class without
+            // `CS_DBLCLKS`, so `WM_LBUTTONDBLCLK` never arrives and the
+            // `DoubleClick` variant is effectively dead. Show on the first
+            // left-click Up instead — same behaviour QQ / WeChat use.
             let show_window = matches!(
                 event,
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
-                    ..
-                } | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
                     ..
                 }
             );
