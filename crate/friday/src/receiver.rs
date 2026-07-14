@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::http::serve;
+use crate::playback::PlaybackRegistry;
 
 /// Compact sink around the worker's mpsc sender. Exposes narrow verbs so
 /// `http::serve` does not depend on the `WorkerEvent` enum directly.
@@ -41,11 +42,13 @@ pub(super) enum WorkerEvent {
 
 struct WorkerHandle {
     stop: Arc<AtomicBool>,
+    playback: Arc<PlaybackRegistry>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
     fn request_stop(&self) {
+        self.playback.kill_all();
         self.stop.store(true, Ordering::Relaxed);
     }
 
@@ -114,8 +117,10 @@ impl FridayReceiver {
 
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let playback = PlaybackRegistry::new();
+        let worker_playback = Arc::clone(&playback);
         let events = EventSink(self.events_tx.clone());
-        let thread = thread::spawn(move || match serve(worker_stop, &events) {
+        let thread = thread::spawn(move || match serve(worker_stop, &events, worker_playback) {
             Ok(()) => {
                 let _ = events.stopped();
             }
@@ -125,6 +130,7 @@ impl FridayReceiver {
         });
         self.worker = Some(WorkerHandle {
             stop,
+            playback,
             thread: Some(thread),
         });
     }

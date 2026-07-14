@@ -3,8 +3,6 @@
 
 use std::{
     io::Read,
-    path::PathBuf,
-    process::Child,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -16,7 +14,11 @@ use base64::{Engine as _, engine::general_purpose};
 use serde::Deserialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use crate::player::{LISTEN_ADDR, POLL_INTERVAL, player_command, resolve_mpv, temporary_mp3_path};
+use crate::playback::PlaybackRegistry;
+use crate::player::{
+    LISTEN_ADDR, POLL_INTERVAL, configure_player_command, player_command, resolve_mpv,
+    temporary_mp3_path,
+};
 
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 8;
@@ -45,6 +47,7 @@ impl Drop for ActiveRequestGuard {
 pub(super) fn serve(
     stop: Arc<AtomicBool>,
     events: &crate::receiver::EventSink,
+    playback: Arc<PlaybackRegistry>,
 ) -> Result<(), String> {
     let player = resolve_mpv().ok_or_else(|| {
         "mpv not found; install it or set FRIDAY_MPV to its executable".to_string()
@@ -59,6 +62,7 @@ pub(super) fn serve(
     let active_requests = Arc::new(AtomicUsize::new(0));
 
     while !stop.load(Ordering::Relaxed) {
+        playback.reap_finished();
         match server.recv_timeout(POLL_INTERVAL) {
             Ok(Some(request)) => {
                 let previous = active_requests.fetch_add(1, Ordering::AcqRel);
@@ -69,22 +73,24 @@ pub(super) fn serve(
                 }
                 let player = player.clone();
                 let active_requests = Arc::clone(&active_requests);
+                let playback = Arc::clone(&playback);
                 // Keep the listener controllable even when a client sends a
                 // slow or incomplete body. The guard bounds such detached
                 // handlers, and dropping the listener still frees port 17322.
                 thread::spawn(move || {
                     let _guard = ActiveRequestGuard(active_requests);
-                    handle_request(request, &player);
+                    handle_request(request, &player, &playback);
                 });
             }
             Ok(None) => {}
             Err(error) => return Err(format!("Friday listener failed: {error}")),
         }
     }
+    playback.kill_all();
     Ok(())
 }
 
-fn handle_request(mut request: Request, player: &str) {
+fn handle_request(mut request: Request, player: &str, playback: &PlaybackRegistry) {
     let method = request.method().clone();
     let url = request.url().to_string();
 
@@ -93,7 +99,9 @@ fn handle_request(mut request: Request, player: &str) {
             text_response(200, "ok\n")
         }
         (Method::Post, "/speak") => {
-            match read_body_limited(&mut request).and_then(|body| parse_and_play(&body, player)) {
+            match read_body_limited(&mut request)
+                .and_then(|body| parse_and_play(&body, player, playback))
+            {
                 Ok(()) => text_response(200, "ok\n"),
                 Err(error) => text_response(error.status, &format!("error: {error}\n")),
             }
@@ -155,7 +163,11 @@ fn read_body_limited(request: &mut Request) -> Result<Vec<u8>, SpeakError> {
     Ok(body)
 }
 
-fn parse_and_play(body: &[u8], player: &str) -> Result<(), SpeakError> {
+fn parse_and_play(
+    body: &[u8],
+    player: &str,
+    playback: &PlaybackRegistry,
+) -> Result<(), SpeakError> {
     let payload: Payload = serde_json::from_slice(body)
         .map_err(|error| SpeakError::bad_request(format!("invalid JSON: {error}")))?;
     if payload.kind != "mp3" {
@@ -170,10 +182,15 @@ fn parse_and_play(body: &[u8], player: &str) -> Result<(), SpeakError> {
             payload.rate
         )));
     }
-    play_mp3(&payload.data, payload.rate, player)
+    play_mp3(&payload.data, payload.rate, player, playback)
 }
 
-fn play_mp3(data: &str, rate: f32, player: &str) -> Result<(), SpeakError> {
+fn play_mp3(
+    data: &str,
+    rate: f32,
+    player: &str,
+    playback: &PlaybackRegistry,
+) -> Result<(), SpeakError> {
     let bytes = general_purpose::STANDARD
         .decode(data)
         .map_err(|error| SpeakError::bad_request(format!("invalid base64 audio: {error}")))?;
@@ -181,23 +198,14 @@ fn play_mp3(data: &str, rate: f32, player: &str) -> Result<(), SpeakError> {
     std::fs::write(&path, bytes)
         .map_err(|error| SpeakError::internal(format!("cannot write temporary MP3: {error}")))?;
 
-    let child = player_command(player)
-        .arg("--no-video")
-        .arg("--really-quiet")
-        .arg(format!("--speed={rate}"))
-        .arg(&path)
-        .spawn()
-        .map_err(|error| {
-            let _ = std::fs::remove_file(&path);
-            SpeakError::internal(format!("cannot start mpv: {error}"))
-        })?;
-    thread::spawn(move || wait_and_remove(child, path));
+    let mut command = player_command(player);
+    configure_player_command(&mut command, rate, &path);
+    let child = command.spawn().map_err(|error| {
+        let _ = std::fs::remove_file(&path);
+        SpeakError::internal(format!("cannot start mpv: {error}"))
+    })?;
+    playback.register(child, path);
     Ok(())
-}
-
-fn wait_and_remove(mut child: Child, path: PathBuf) {
-    let _ = child.wait();
-    let _ = std::fs::remove_file(path);
 }
 
 fn text_response(status: u16, body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -265,13 +273,17 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_payloads_before_starting_player() {
-        let error = parse_and_play(br#"{"type":"wav","data":"","rate":1.0}"#, "mpv").unwrap_err();
+        let playback = PlaybackRegistry::new();
+        let error =
+            parse_and_play(br#"{"type":"wav","data":"","rate":1.0}"#, "mpv", &playback).unwrap_err();
         assert_eq!(error.to_string(), "unsupported type: wav");
     }
 
     #[test]
     fn rejects_playback_rate_outside_supported_range() {
-        let error = parse_and_play(br#"{"type":"mp3","data":"","rate":2.1}"#, "mpv").unwrap_err();
+        let playback = PlaybackRegistry::new();
+        let error =
+            parse_and_play(br#"{"type":"mp3","data":"","rate":2.1}"#, "mpv", &playback).unwrap_err();
         assert_eq!(error.to_string(), "rate out of range: 2.1");
     }
 }

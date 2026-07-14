@@ -40,7 +40,12 @@ fn find_program(program: &str) -> Option<String> {
 
 #[cfg(not(target_os = "windows"))]
 pub(super) fn player_command(program: &str) -> Command {
-    Command::new(program)
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new(program);
+    // New session / process group: mpv stays headless and does not grab a TTY.
+    command.process_group(0);
+    command
 }
 
 #[cfg(target_os = "windows")]
@@ -51,6 +56,18 @@ pub(super) fn player_command(program: &str) -> Command {
     let mut command = Command::new(program);
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+/// mpv flags shared by `/speak` playback: no window, no OSD, no terminal UI.
+pub(super) fn configure_player_command(command: &mut Command, rate: f32, path: &std::path::Path) {
+    command
+        .arg("--no-video")
+        .arg("--really-quiet")
+        .arg("--force-window=no")
+        .arg("--osd-level=0")
+        .arg("--no-terminal")
+        .arg(format!("--speed={rate}"))
+        .arg(path);
 }
 
 pub(super) fn temporary_mp3_path() -> PathBuf {

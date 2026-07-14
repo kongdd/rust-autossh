@@ -16,6 +16,7 @@
 //! the rest stays crate-private.
 
 mod http;
+mod playback;
 mod player;
 mod receiver;
 
