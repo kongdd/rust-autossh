@@ -6,7 +6,5 @@
 images
 
 docs
-!docs/
-docs/*
 !docs/icons/
 !docs/icons/**
