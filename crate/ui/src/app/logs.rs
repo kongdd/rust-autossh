@@ -10,8 +10,9 @@ impl AutosshApp {
     pub fn render_logs_panel(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("logs")
             .resizable(true)
-            .default_size(220.0)
-            .size_range(120.0..=460.0)
+            // Compact by default; drag the splitter when a long tail is needed.
+            .default_size(210.0)
+            .size_range(160.0..=360.0)
             .show_inside(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);

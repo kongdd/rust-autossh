@@ -67,8 +67,14 @@ fn spawn_with_sshpass(
     connection: &ConnectionConfig,
     keepalive: &KeepaliveConfig,
 ) -> std::io::Result<Child> {
+    let sshpass = resolve_sshpass().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "sshpass not found beside this binary or on PATH",
+        )
+    })?;
     let ssh = connection.ssh_path.clone().unwrap_or_else(default_ssh_path);
-    let mut command = Command::new("sshpass");
+    let mut command = Command::new(sshpass);
     command
         .arg("-e")
         .arg(ssh)
@@ -173,12 +179,14 @@ pub fn test_connection(
     if need_sshpass && !sshpass_available() {
         return TestOutput {
             ok: false,
-            message: "password auth requires `sshpass` on PATH; install it and retry".into(),
+            message: "password auth requires `sshpass` beside autossh-core/autossh-ui or on PATH; install it and retry"
+                .into(),
         };
     }
     let mut command = if need_sshpass {
+        let sshpass = resolve_sshpass().expect("checked by sshpass_available");
         let ssh = connection.ssh_path.clone().unwrap_or_else(default_ssh_path);
-        let mut command = Command::new("sshpass");
+        let mut command = Command::new(sshpass);
         command
             .arg("-e")
             .arg(ssh)
@@ -258,20 +266,53 @@ pub fn test_connection(
     }
 }
 
-/// Check whether `sshpass` can be started from PATH.
+/// Locate `sshpass`: sibling of the running binary (e.g. beside `autossh-ui.exe`
+/// / `autossh-core.exe`), then each directory on `PATH`.
+fn resolve_sshpass() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const NAMES: &[&str] = &["sshpass.exe", "sshpass"];
+    #[cfg(not(windows))]
+    const NAMES: &[&str] = &["sshpass"];
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for name in NAMES {
+                let candidate = parent.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for name in NAMES {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Check whether `sshpass` can be started (resolved path + spawn).
 ///
 /// This deliberately checks process creation rather than the exit status of
 /// `sshpass -V`: some Windows builds expose a different version flag (or return
 /// a non-zero status for it) even though the executable itself is usable.
 /// Do not memoise this result; it lets a running GUI recognise an executable
-/// copied into an existing PATH directory after an earlier failed probe.
+/// copied beside the UI or into PATH after an earlier failed probe.
 fn sshpass_available() -> bool {
+    let Some(sshpass) = resolve_sshpass() else {
+        return false;
+    };
     // Run the availability check through the same helper as the real spawn
     // so we don't briefly allocate a console window just to ask "are you
     // there?" of `sshpass -V`. Without CREATE_NO_WINDOW on Windows, this
     // single line produces the only visible flicker in the test-connection
     // flow.
-    let mut command = std::process::Command::new("sshpass");
+    let mut command = std::process::Command::new(sshpass);
     command.arg("-V");
     configure_quiet_spawn(&mut command);
     command.status().is_ok()

@@ -571,7 +571,7 @@ pub fn run_add_dialog_ui(ui: &mut egui::Ui, state: &mut AddDialogState, name_tak
         ui.allocate_ui(egui::vec2(PASSWORD_WIDTH, FIELD_HEIGHT), |ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new("Password").strong().color(FG_PRIMARY))
-                    .on_hover_text("Optional; stored as plaintext and requires sshpass on PATH");
+                    .on_hover_text("Optional; stored as plaintext; requires sshpass beside autossh-ui or on PATH");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.password)
                         .password(true)

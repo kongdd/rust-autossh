@@ -1,11 +1,17 @@
-//! Embeds `docs/autossh-tunnel.ico` into `autossh-ui.exe` (Explorer / taskbar icon).
+//! Embeds `docs/autossh-tunnel.ico` into the PE and pre-rasterizes RGBA for the UI/tray.
 
 use std::path::{Path, PathBuf};
 
+const WINDOW_ICON_PX: u32 = 64;
+const TRAY_ICON_PX: u32 = 32;
+
 fn main() {
-    let icon = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("missing manifest dir"))
-        .join("../../docs/autossh-tunnel.ico");
+    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest"));
+    let icon = manifest_dir.join("../../docs/autossh-tunnel.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
+
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    rasterize_icons(&icon, &out_dir);
 
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         let icon = icon
@@ -17,18 +23,28 @@ fn main() {
         resources
             .compile()
             .expect("cannot embed Windows icon resource");
-        // `resource.o` only carries a `.rsrc` section (no symbols). GNU ld drops it
-        // from `libresource.a` unless we link the object explicitly.
-        let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-        let resource_obj = PathBuf::from(&out_dir).join("resource.o");
-        println!(
-            "cargo:rustc-link-arg={}",
-            resource_obj.display()
-        );
+        let resource_obj = out_dir.join("resource.o");
+        println!("cargo:rustc-link-arg={}", resource_obj.display());
     }
 }
 
-/// Cross-compiling `*-pc-windows-gnu` on Linux must use MinGW `windres`/`ar`.
+fn rasterize_icons(ico: &Path, out_dir: &Path) {
+    use image::imageops::FilterType;
+
+    let bytes = std::fs::read(ico).expect("read autossh-tunnel.ico");
+    for (size, name) in [
+        (WINDOW_ICON_PX, "window_icon.bin"),
+        (TRAY_ICON_PX, "tray_icon.bin"),
+    ] {
+        let image = image::load_from_memory(&bytes).expect("decode .ico in build.rs");
+        let image = image.resize_to_fill(size, size, FilterType::Triangle);
+        let rgba = image.to_rgba8().into_raw();
+        let path = out_dir.join(name);
+        std::fs::write(&path, &rgba).expect("write raster icon");
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
 #[cfg(not(windows))]
 fn configure_mingw_toolchain(resources: &mut winres::WindowsResource) {
     let target = std::env::var("TARGET").unwrap_or_default();

@@ -54,8 +54,10 @@ fn main() -> Result<()> {
     let app = AutosshApp::load(config_path)?;
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("autossh-core")
-        .with_inner_size([1024.0, 720.0])
-        .with_min_inner_size([820.0, 560.0]);
+        // Compact default: Connections + Keepalive/Friday fit without a tall
+        // empty mid band; user can still resize up for long log tails.
+        .with_inner_size([980.0, 560.0])
+        .with_min_inner_size([780.0, 480.0]);
     if let Some(icon) = tunnel_icon::window_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
     }

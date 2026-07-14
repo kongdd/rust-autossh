@@ -33,7 +33,17 @@ impl AutosshApp {
                 });
             });
             ui.separator();
-            self.render_globals(ui);
+
+            // Pack Keepalive/Retry + Friday at the top of the centre column.
+            // Do not force a fixed max_height (clips Friday) or bottom-pin Friday
+            // (opens a dead band between the two blocks).
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    self.render_globals(ui);
+                    ui.add_space(6.0);
+                    self.render_friday(ui);
+                });
         });
     }
 
@@ -93,48 +103,34 @@ impl AutosshApp {
             ),
         ];
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(8.0);
-            ui.columns(2, |cols| {
-                for (i, rows) in [&keepalive, &retry].iter().enumerate() {
-                    cols[i].group(|ui| {
-                        ui.add_space(4.0);
-                        ui.heading(if i == 0 { "Keepalive" } else { "Retry" });
-                        ui.add_space(4.0);
-                        for (idx, group, (display, edit)) in rows.iter() {
-                            self.render_global_row(
-                                ui,
-                                *idx,
-                                &mut sel,
-                                *group,
-                                display.clone(),
-                                edit.clone(),
-                            );
-                        }
-                    });
-                }
-            });
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(
-                    "shared by every connection; click to highlight, double-click to edit",
-                )
-                .small()
-                .color(FG_MUTED),
-            );
-            ui.add_space(8.0);
-            self.render_friday(ui);
-            ui.add_space(8.0);
-            ui.collapsing("Active connections", |ui| {
-                for (i, c) in self.config.connections.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{}.", i + 1)).color(FG_MUTED));
-                        ui.label(RichText::new(&c.name).strong());
-                        ui.label(RichText::new(format!("→ {}", c.destination())).color(FG_MUTED));
-                    });
-                }
-            });
+        ui.add_space(4.0);
+        ui.columns(2, |cols| {
+            for (i, rows) in [&keepalive, &retry].iter().enumerate() {
+                cols[i].group(|ui| {
+                    ui.add_space(2.0);
+                    ui.heading(if i == 0 { "Keepalive" } else { "Retry" });
+                    ui.add_space(2.0);
+                    for (idx, group, (display, edit)) in rows.iter() {
+                        self.render_global_row(
+                            ui,
+                            *idx,
+                            &mut sel,
+                            *group,
+                            display.clone(),
+                            edit.clone(),
+                        );
+                    }
+                });
+            }
         });
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(
+                "shared by every connection; click to highlight, double-click to edit",
+            )
+            .small()
+            .color(FG_MUTED),
+        );
         self.selected_global = sel;
     }
 
@@ -150,30 +146,52 @@ impl AutosshApp {
             FridayState::Failed => ("failed", FG_ERROR),
         };
 
+        // Compact card: title + status/action on one row, endpoint below.
         let action = ui
             .group(|ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.heading("Friday voice receiver");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("● {status}"))
-                                .strong()
-                                .color(color),
-                        );
-                    });
-                });
+                let click = ui
+                    .horizontal(|ui| {
+                        ui.heading("Friday voice receiver");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let click = match state {
+                                FridayState::Stopped | FridayState::Failed => ui
+                                    .small_button("▶  Start")
+                                    .clicked()
+                                    .then_some(true),
+                                FridayState::Listening => ui
+                                    .small_button("■  Stop")
+                                    .clicked()
+                                    .then_some(false),
+                                FridayState::Starting => {
+                                    ui.add_enabled(
+                                        false,
+                                        egui::Button::new("Starting…").small(),
+                                    );
+                                    None
+                                }
+                                FridayState::Stopping => {
+                                    ui.add_enabled(
+                                        false,
+                                        egui::Button::new("Stopping…").small(),
+                                    );
+                                    None
+                                }
+                            };
+                            ui.label(
+                                RichText::new(format!("● {status}"))
+                                    .strong()
+                                    .color(color),
+                            );
+                            click
+                        })
+                        .inner
+                    })
+                    .inner;
                 ui.label(
                     RichText::new(format!("Local endpoint: http://{LISTEN_ADDR}/speak"))
                         .monospace()
                         .color(FG_PRIMARY),
-                );
-                ui.label(
-                    RichText::new(
-                        "Receives MP3 audio from friday.ts and plays it with mpv. The listener only binds to localhost.",
-                    )
-                    .small()
-                    .color(FG_MUTED),
                 );
                 if let Some(player) = player {
                     ui.label(
@@ -184,27 +202,14 @@ impl AutosshApp {
                 }
                 if let Some(error) = error {
                     ui.label(RichText::new(error).small().color(FG_ERROR));
+                } else {
+                    ui.label(
+                        RichText::new("MP3 from friday.ts → mpv; localhost only.")
+                            .small()
+                            .color(FG_MUTED),
+                    );
                 }
-                ui.add_space(4.0);
-
-                match state {
-                    FridayState::Stopped | FridayState::Failed => ui
-                        .button("▶  Start listener")
-                        .clicked()
-                        .then_some(true),
-                    FridayState::Listening => ui
-                        .button("■  Stop listener")
-                        .clicked()
-                        .then_some(false),
-                    FridayState::Starting => {
-                        ui.add_enabled(false, egui::Button::new("Starting…"));
-                        None
-                    }
-                    FridayState::Stopping => {
-                        ui.add_enabled(false, egui::Button::new("Stopping…"));
-                        None
-                    }
-                }
+                click
             })
             .inner;
 
@@ -234,7 +239,7 @@ impl AutosshApp {
             .fill(fill)
             .stroke(egui::Stroke::new(sw, sc))
             .corner_radius(egui::CornerRadius::same(4))
-            .inner_margin(egui::Margin::symmetric(10, 6))
+            .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.vertical(|ui| {

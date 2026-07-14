@@ -24,10 +24,7 @@ impl AutosshApp {
                     ui.heading("Connections");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("📥  Import").clicked() {
-                            let initial = crate::default_path()
-                                .parent()
-                                .map(std::path::PathBuf::from)
-                                .unwrap_or_default();
+                            let initial = crate::default_path();
                             self.modal = Modal::Import(crate::modal::ImportDialogState {
                                 path_input: initial.display().to_string(),
                                 ..crate::modal::ImportDialogState::default()

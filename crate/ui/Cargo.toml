@@ -7,6 +7,7 @@ license = "MIT"
 build = "build.rs"
 
 [build-dependencies]
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }
 winres = "0.1"
 
 [[bin]]
@@ -17,9 +18,14 @@ path = "src/main.rs"
 autossh-core = { path = "../core" }
 friday = { path = "../friday" }
 anyhow = "1.0"
-image = { version = "0.25", default-features = false, features = ["ico", "png"] }
-eframe = { version = "0.34.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 encoding_rs = "0.8"
 
+# Windows release: OpenGL only — no accesskit / wayland / x11 (smaller exe).
 [target.'cfg(target_os = "windows")'.dependencies]
+# No bundled egui fonts on Windows — `install_windows_icon_fonts` loads Segoe/YaHei.
+eframe = { version = "0.34.3", default-features = false, features = ["glow"] }
 tray-icon = "0.24.1"
+
+# Linux dev / UI preview skill.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+eframe = { version = "0.34.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }

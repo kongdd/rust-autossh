@@ -7,7 +7,7 @@
 # Editing them here propagates to all connections on the next supervisor reload.
 #
 # Optional password fallback: when `password` is set, `BatchMode=yes` is dropped
-# and `sshpass -e` feeds the password non-interactively. Requires `sshpass` on PATH.
+# and `sshpass -e` feeds the password non-interactively. Requires `sshpass` beside autossh-ui/autossh-core or on PATH.
 # `user` (optional) prepends `user@` to `host` unless `host` already contains `@`.
 
 # keepalive: ServerAliveInterval / ServerAliveCountMax / ConnectTimeout (seconds).
