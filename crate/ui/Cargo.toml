@@ -18,6 +18,7 @@ path = "src/main.rs"
 autossh-core = { path = "../core" }
 friday = { path = "../friday" }
 anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 encoding_rs = "0.8"
 
 # Windows release: OpenGL only — no accesskit / wayland / x11 (smaller exe).

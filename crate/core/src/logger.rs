@@ -3,10 +3,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use chrono::Local;
 
 use crate::config::LogConfig;
 
@@ -63,11 +63,8 @@ impl Logger {
     }
 
     fn write(&self, level: &str, message: &str) {
-        let seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let line = format!("[{seconds}] {level:<5} {message}\n");
+        let stamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let line = format!("[{stamp}] {level:<5} {message}\n");
         eprint!("{line}");
 
         let mut sink = self.0.lock().unwrap_or_else(|error| error.into_inner());

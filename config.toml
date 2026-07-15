@@ -25,7 +25,7 @@ host = "amd"
 # password = "s3cret"             # optional; enables password auth via sshpass
 # port = 2222                       # optional; SSH defaults to 22
 forwards = [
-  # L/R: [bind:]port:host:port — listen side and target side swap per mode.
+  # L/R: `5173` (→ 127.0.0.1:5173) or `5173:127.0.0.1:5173` or `[bind:]listen:host:port`.
   # Add enabled = false to retain a mapping without starting it.
   { mode = "local",   forward = "0.0.0.0:8080:127.0.0.1:8080" },  # client → server
   { mode = "remote",  forward = "1081:192.168.31.1:7890" },        # server → client

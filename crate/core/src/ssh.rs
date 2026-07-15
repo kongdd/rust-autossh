@@ -119,7 +119,13 @@ pub fn args(connection: &ConnectionConfig, keepalive: &KeepaliveConfig) -> Vec<S
             }
             .into(),
         );
-        args.push(forward.forward.clone());
+        let spec = match forward.mode {
+            ForwardMode::Local | ForwardMode::Remote => {
+                crate::config::canonicalize_static_forward_spec(&forward.forward)
+            }
+            ForwardMode::Dynamic => forward.forward.clone(),
+        };
+        args.push(spec);
     }
     args.push(connection.destination().clone());
     args

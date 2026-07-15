@@ -340,6 +340,12 @@ fn describe_forward_list(forwards: &[ForwardInfo]) -> String {
 fn parse_forward_spec(spec: &str) -> Option<(Option<String>, String, String, String)> {
     let parts = split_forward_spec(spec);
     match parts.as_slice() {
+        [listen_port] if !listen_port.is_empty() => Some((
+            None,
+            listen_port.clone(),
+            "127.0.0.1".into(),
+            listen_port.clone(),
+        )),
         [listen_port, target_host, target_port] if !listen_port.is_empty() => Some((
             None,
             listen_port.clone(),

@@ -68,7 +68,8 @@ pub struct ForwardConfig {
     pub enabled: bool,
     /// `remote` → `ssh -R`; `local` → `ssh -L`; `dynamic` → `ssh -D` (SOCKS proxy).
     pub mode: ForwardMode,
-    /// For `local` / `remote`: `[bind:]host:port:target_host:target_port` (e.g. `10022:127.0.0.1:22`).
+    /// For `local` / `remote`: full `[bind:]listen:target_host:target_port`, or shorthand
+    /// `listen` when target is `127.0.0.1:listen` (e.g. `5173` or `5173:127.0.0.1:5173`).
     /// For `dynamic`: `[bind:]port` (e.g. `1080` or `0.0.0.0:1080`).
     pub forward: String,
     /// Optional human-readable note displayed by the GUI (e.g. "home SSH",
@@ -141,24 +142,31 @@ fn default_retry_stable() -> u64 {
     60
 }
 
-/// `ssh -L` / `-R` spec: `[bind_host:]listen_port:target_host:target_port` with at
-/// least a listen port and a target (so `port:host:port` or `host:port:host:port`).
+/// `ssh -L` / `-R` spec: `listen` (same port on `127.0.0.1`), `port:host:port`, or
+/// `[bind:]listen:host:port`.
 fn is_valid_static_forward_spec(spec: &str) -> bool {
     let parts = split_forward_spec(spec);
-    let target_port = match parts.as_slice() {
-        [port, _host, tport] => Some((port, tport)),
-        [host, port, _host, tport] => Some((port, tport)).map(|p| {
-            let _ = host;
-            p
-        }),
-        _ => None,
-    };
-    match target_port {
-        Some((listen_port, target_port)) => {
+    match parts.as_slice() {
+        [port] => is_valid_port(port),
+        [listen_port, _target_host, target_port] => {
             is_valid_port(listen_port) && is_valid_port(target_port)
         }
-        None => false,
+        [listen_host, listen_port, _target_host, target_port] => {
+            let _ = listen_host;
+            is_valid_port(listen_port) && is_valid_port(target_port)
+        }
+        _ => false,
     }
+}
+
+/// Expands L/R shorthand `port` → `port:127.0.0.1:port` for `ssh -L`/`-R`.
+pub(crate) fn canonicalize_static_forward_spec(spec: &str) -> String {
+    let trimmed = spec.trim();
+    let parts = split_forward_spec(trimmed);
+    if parts.len() == 1 && is_valid_port(parts[0]) {
+        return format!("{trimmed}:127.0.0.1:{trimmed}");
+    }
+    trimmed.to_string()
 }
 
 /// `ssh -D` spec: `[bind_host:]port` where the trailing segment is the only required
@@ -307,7 +315,7 @@ impl Config {
                     ForwardMode::Local | ForwardMode::Remote => {
                         if !is_valid_static_forward_spec(spec) {
                             bail!(
-                                "connection {}: forward {:?} for mode {:?} must be `[bind:]listen_port:target_host:target_port`",
+                                "connection {}: forward {:?} for mode {:?} must be `listen`, `listen:target_host:target_port`, or `[bind:]listen:target_host:target_port`",
                                 connection.name,
                                 forward.forward,
                                 forward.mode,

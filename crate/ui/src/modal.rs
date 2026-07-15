@@ -378,8 +378,8 @@ fn forward_hint(mode: ForwardMode) -> &'static str {
     match mode {
         // Hints are intentionally short so they fit inside the ~225 px column
         // reserved for the spec input alongside the per-forward description.
-        ForwardMode::Local => "0.0.0.0:8080:127.0.0.1:80  (L client→target)",
-        ForwardMode::Remote => "10022:127.0.0.1:22  (R server→target)",
+        ForwardMode::Local => "5173  or  5173:127.0.0.1:5173  (L)",
+        ForwardMode::Remote => "5173  or  5173:127.0.0.1:5173  (R)",
         ForwardMode::Dynamic => "1080  (D SOCKS)",
     }
 }

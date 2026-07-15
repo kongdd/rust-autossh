@@ -1,5 +1,6 @@
 //! Log entry types, shared colour palette, and supervisor stderr parsing.
 
+use chrono::{Local, NaiveDateTime, TimeZone};
 use eframe::egui::Color32;
 
 // ─── shared colour palette ──────────────────────────────────────────────────
@@ -151,11 +152,18 @@ pub fn is_displayable(entry: &LogEntry) -> bool {
     !entry.message.contains("using \"publickey\"")
 }
 
-/// Extract the Unix timestamp from a leading `[...]` bracket.
+/// Extract a Unix timestamp from a leading `[...]` bracket (local wall-clock or legacy epoch).
 fn parse_ts(line: &str) -> Option<u64> {
     let after = line.strip_prefix('[')?;
     let end = after.find(']')?;
-    after[..end].parse::<u64>().ok()
+    let token = &after[..end];
+    if let Ok(secs) = token.parse::<u64>() {
+        return Some(secs);
+    }
+    NaiveDateTime::parse_from_str(token, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .map(|dt| dt.timestamp().max(0) as u64)
 }
 
 /// Extract the connection name from a structured log line such as
@@ -178,14 +186,13 @@ fn parse_connection(line: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Render a Unix epoch timestamp as `HH:MM:SS` (24-hour, wraps at 86400 s).
+/// Render a Unix epoch timestamp as local `HH:MM:SS` (24-hour).
 pub fn format_unix_ts(secs: u64) -> String {
-    format!(
-        "{:02}:{:02}:{:02}",
-        (secs / 3600) % 24,
-        (secs / 60) % 60,
-        secs % 60,
-    )
+    Local
+        .timestamp_opt(secs as i64, 0)
+        .single()
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "??:??:??".to_string())
 }
 
 #[cfg(test)]
@@ -223,10 +230,25 @@ mod tests {
     }
 
     #[test]
-    fn format_unix_ts_renders_hms_and_wraps_a_day() {
-        assert_eq!(format_unix_ts(48_059), "13:20:59");
-        assert_eq!(format_unix_ts(0), "00:00:00");
-        assert_eq!(format_unix_ts(48_059 + 86_400), "13:20:59");
+    fn format_unix_ts_renders_local_hms() {
+        let secs = Local
+            .with_ymd_and_hms(2024, 1, 15, 13, 20, 59)
+            .single()
+            .expect("valid local datetime")
+            .timestamp() as u64;
+        assert_eq!(format_unix_ts(secs), "13:20:59");
+    }
+
+    #[test]
+    fn parse_ts_accepts_local_wall_clock_and_legacy_epoch() {
+        assert_eq!(
+            parse_ts("[2024-01-15 13:20:59] INFO hi"),
+            Local
+                .with_ymd_and_hms(2024, 1, 15, 13, 20, 59)
+                .single()
+                .map(|dt| dt.timestamp() as u64)
+        );
+        assert_eq!(parse_ts("[1715000000] INFO hi"), Some(1_715_000_000));
     }
 
     #[test]

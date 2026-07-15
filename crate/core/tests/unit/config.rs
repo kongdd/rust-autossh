@@ -103,6 +103,38 @@ fn rejects_dynamic_forward_with_extra_target_segments() {
 }
 
 #[test]
+fn accepts_static_forward_shorthand_port() {
+    let mut connection = connection();
+    connection.forwards = vec![
+        ForwardConfig {
+            enabled: true,
+            mode: ForwardMode::Local,
+            forward: "5173".into(),
+            description: None,
+        },
+        ForwardConfig {
+            enabled: true,
+            mode: ForwardMode::Remote,
+            forward: "5173".into(),
+            description: None,
+        },
+        ForwardConfig {
+            enabled: true,
+            mode: ForwardMode::Local,
+            forward: "5173:127.0.0.1:5173".into(),
+            description: None,
+        },
+    ];
+    let config = Config {
+        log: LogConfig::default(),
+        keepalive: KeepaliveConfig::default(),
+        retry: RetryConfig::default(),
+        connections: vec![connection],
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
 fn accepts_dynamic_forward_specs() {
     let mut connection = connection();
     connection.forwards = vec![

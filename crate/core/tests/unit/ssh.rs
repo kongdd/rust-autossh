@@ -65,6 +65,22 @@ fn emits_dynamic_forward_argument_as_dash_d() {
 }
 
 #[test]
+fn expands_static_forward_shorthand_for_ssh() {
+    let mut conn = connection();
+    conn.forwards = vec![ForwardConfig {
+        enabled: true,
+        mode: ForwardMode::Remote,
+        forward: "5173".into(),
+        description: None,
+    }];
+    let args = args(&conn, &KeepaliveConfig::default());
+    assert!(
+        args.windows(2).any(|part| part == ["-R", "5173:127.0.0.1:5173"]),
+        "missing expanded -R spec in {args:?}"
+    );
+}
+
+#[test]
 fn disabled_forwards_are_omitted() {
     let mut conn = connection();
     conn.forwards[0].enabled = false;
