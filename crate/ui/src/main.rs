@@ -108,10 +108,8 @@ fn parse_args() -> PathBuf {
     path
 }
 
-/// Default config path. Delegates to `autossh_core::default_config_path` so the
-/// `autossh-core` CLI and the `autossh-ui` GUI resolve the same path on every
-/// platform: `~/.config/autossh/config.toml` (`%USERPROFILE%\.config\autossh\config.toml`
-/// on Windows). The `.config` directory is created on first run by `ensure_config`.
+/// Delegates to `autossh_core::default_config_path` so CLI and GUI share the
+/// same resolution: `<exe-dir>/config.toml` > `~/.config/autossh/config.toml`.
 pub fn default_path() -> PathBuf {
     autossh_core::default_config_path()
 }

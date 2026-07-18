@@ -15,14 +15,28 @@ pub use config::{
 pub use ssh::{TestOutput, test_connection};
 pub use supervisor::run;
 
-/// Default config path, identical on every platform: `~/.config/autossh/config.toml`.
+/// Config path resolution order:
+///   1. `<exe-dir>/config.toml` — portable binary + private config.
+///   2. `~/.config/autossh/config.toml` — standard XDG location.
 ///
-/// Linux/macOS resolve `~` from `$HOME` (XDG Base Directory). Windows resolves
-/// it from `%USERPROFILE%` (falling back to `HOME` for MSYS/Git Bash shells
-/// that set it). Keeping the same relative path on both platforms means the
-/// docs, examples, and scripts in `README.md` work unchanged everywhere; the
-/// `.config` directory is created on first run by `ensure_config`.
+/// `ensure_config` only writes example when both are missing, so putting a
+/// `config.toml` next to the exe is enough to override without touching `$HOME`.
 pub fn default_config_path() -> PathBuf {
+    if let Some(exe) = std::env::current_exe().ok() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("config.toml");
+            // `is_file` over `exists` so a `config.toml/` directory doesn't shadow.
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    home_config_path()
+}
+
+/// Standard XDG config location (`~/.config/autossh/config.toml`).
+/// Separated so `ensure_config` and tests can reference it without the exe probe.
+pub fn home_config_path() -> PathBuf {
     let home = home_dir();
     PathBuf::from(home)
         .join(".config")
